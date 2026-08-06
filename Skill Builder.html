@@ -1,0 +1,976 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Claude Skill Creator</title>
+<style>
+@keyframes float1{0%,100%{transform:translateY(0px)}50%{transform:translateY(-12px)}}
+@keyframes float2{0%,100%{transform:translateY(0px)}50%{transform:translateY(-18px)}}
+@keyframes float3{0%,100%{transform:translateY(0px)}50%{transform:translateY(-8px)}}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes fadeInUp{from{opacity:0;transform:translateY(15px)}to{opacity:1;transform:translateY(0)}}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#FAF8F4}
+::-webkit-scrollbar{width:6px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:rgba(180,160,130,0.3);border-radius:3px}
+.spinner{width:28px;height:28px;border:2px solid rgba(160,130,100,0.2);border-top-color:#9A7A5A;border-radius:50%;animation:spin .8s linear infinite}
+.config-banner{position:fixed;top:0;left:0;right:0;z-index:999;background:#F5EDE0;border-bottom:1px solid rgba(200,185,165,0.5);padding:10px 24px;display:flex;align-items:center;justify-content:center;gap:10px;font-size:0.82rem;color:#7A6A5A;font-family:'Georgia',serif}
+.config-banner a{color:#5A4A3A;font-weight:600;margin-left:4px}
+.alert-enter{animation:slideDown .3s ease}
+@keyframes slideDown{from{transform:translateY(-100%)}to{transform:translateY(0)}}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script src="lib/react.production.min.js"></script>
+<script src="lib/react-dom.production.min.js"></script>
+<script type="text/template" id="skill-prompt-template">You are an expert Claude skill architect. Convert structured form input into a production-quality SKILL.md file.
+
+---
+
+## INPUT FIELDS
+
+Mandatory (always present):
+- Skill Name: {{skill_name}}
+- Core Function: {{core_function}}
+- Goals & Objectives: {{goals}}
+
+Optional (may be empty, blank, "N/A", "none", or "TBD" — treat ALL of these as NOT PROVIDED):
+- Tone & Voice: {{tone_voice}}
+- Workflow Steps: {{workflow_steps}}
+- Constraints & Safety: {{constraints}}
+- Example Interactions: {{examples}}
+- Output Types: {{output_types}}
+
+---
+
+## NULL FIELD RULE (apply before anything else)
+
+If an optional field is empty, whitespace-only, "N/A", "none", "TBD", or a dash — it is NULL.
+NULL field = omit that section entirely from the SKILL.md. Never invent content for NULL fields.
+Exception: Workflow. If Workflow Steps is NULL, DERIVE steps from Core Function + Goals (see Workflow rules below).
+
+---
+
+## OUTPUT FORMAT
+
+Produce raw SKILL.md only.
+- Start with `---` (YAML frontmatter open)
+- End with last line of content
+- No preamble, no explanation, no markdown fences wrapping the whole output
+- No HTML comments in the final file
+
+After the SKILL.md content, on a NEW LINE output this metadata block ONLY (for the builder UI, not part of the skill file):
+<!--BUILDER_META complexity: simple|moderate|complex suggest_references: true|false reason: string -->
+
+---
+
+## SECTION-BY-SECTION RULES
+
+### YAML Frontmatter (always required)
+
+name: {{skill_name | kebab-case | lowercase}}
+description: >
+  [TRIGGER-FIRST paragraph. Max 80 words. Rules:
+   1. Lead with what the skill DOES (verb-first: "Generates...", "Analyzes...", "Converts...")
+   2. Follow with WHEN TO TRIGGER: list specific user phrases, task types, keywords, contexts
+   3. Be slightly pushy — Claude undertriggers by default, so list edge cases that should still fire this skill
+   4. All "when to use" info lives HERE only, never in the body
+
+   WEAK (don't do): "A skill for helping with data analysis tasks."
+   STRONG (do): "Performs structured data analysis on CSVs, spreadsheets, and raw datasets.
+   Trigger whenever user asks to analyze, clean, summarize, chart, or find patterns in data —
+   even if they don't say 'analyze', e.g. 'what's wrong with my spreadsheet', 'summarize
+   these numbers', 'why is revenue dropping'."]
+compatibility: [only include if skill needs specific tools/MCPs/deps — otherwise DELETE this line entirely]
+
+### Title + Overview (always required)
+- H1 = Skill Name in Title Case
+- 1-2 sentences: plain-English what + who benefits. No fluff.
+
+### Goals (always required)
+- Derive directly from Goals & Objectives field
+- Bullet list, action-oriented ("Enable X", "Produce Y", "Ensure Z")
+- 2-4 bullets max
+
+### Tone & Voice (only if field NOT NULL)
+- 2-4 bullets reflecting the style
+- If field IS NULL → omit section entirely, no placeholder
+
+### Workflow (always required — derive if NULL)
+RULES:
+- If Workflow Steps provided → clean, number, convert to imperative verbs
+- If Workflow Steps NULL → infer sensible 4-6 steps from Core Function + Goals alone
+- Format: `N. **Step title** — what to do and why (one line)`
+- 4-8 steps ideal, hard max 10
+- If any provided step conflicts with a Constraint → Constraint wins; rewrite the step to comply, do not silently drop it
+
+### Constraints & Safety (only if field NOT NULL, OR domain clearly implies critical rules)
+
+### Examples (only if field NOT NULL)
+- Max 2 examples
+
+### Output Types (only if field NOT NULL)
+- Bullet list of artifact/output types</script>
+<script>
+(function(){
+'use strict';
+const{createElement:h,useState,useEffect,useRef,Fragment}=React;
+
+
+function getConfig(){
+  try{return JSON.parse(localStorage.getItem('claude-skill-config')||'{}')}catch(e){return{}}
+}
+function hasConfig(){const c=getConfig();return!!(c.BASE_URL&&c.API_KEY&&c.MODEL_NAME)}
+
+
+async function callAI(systemPrompt,userPrompt){
+  const cfg=getConfig();
+  const isAnthropic=cfg.BASE_URL.includes('anthropic')||cfg.BASE_URL.includes('api.anthropic');
+  var url=cfg.BASE_URL.replace(/\/+$/,'');if(!isAnthropic&&!url.includes('chat/completions')){if(!url.endsWith('/v1'))url=url+'/v1';url=url+'/chat/completions';}
+  const headers={"Content-Type":"application/json"};
+  if(cfg.API_KEY){
+    headers[isAnthropic?"x-api-key":"Authorization"]=isAnthropic?cfg.API_KEY:"Bearer "+cfg.API_KEY;
+  }
+  if(isAnthropic){headers['anthropic-version']='2023-06-01';headers['anthropic-dangerous-direct-browser-access']='true';}
+  const body=isAnthropic?{
+    model:cfg.MODEL_NAME,
+    max_tokens:4096,
+    system:systemPrompt,
+    messages:[{role:"user",content:userPrompt}]
+  }:{
+    model:cfg.MODEL_NAME,
+    max_tokens:4096,
+    messages:[{role:"system",content:systemPrompt},{role:"user",content:userPrompt}]
+  };
+  const controller=new AbortController();
+  var timeout=setTimeout(function(){controller.abort()},180000);
+  try{
+    const res=await fetch(url,{method:"POST",headers,body:JSON.stringify(body),signal:controller.signal});
+    clearTimeout(timeout);
+    const data=await res.json();
+    if(data.content&&Array.isArray(data.content))return data.content.map(function(b){return b.text||""}).join("")||"";
+    if(data.choices&&data.choices[0]&&data.choices[0].message)return data.choices[0].message.content||"";
+    if(data.error)throw new Error(data.error.message||JSON.stringify(data.error));
+    throw new Error("Unexpected API response format");
+  }catch(e){
+    clearTimeout(timeout);
+    if(e.name==='AbortError')throw new Error("Request timed out after 3 minutes");
+    if(e.name==='TypeError'||e.message.includes('fetch')){
+      var hint='';
+      hint='\n\nIf using LM Studio: ensure CORS is enabled in LM Studio Server settings, and your Base URL includes /v1 (e.g. http://localhost:1234/v1).';if(location.protocol==='file:')hint+='\n\nAlso open localapi.bat to serve via localhost instead of file://';
+      throw new Error("Connection failed — check your Base URL"+hint);
+    }
+    throw e;
+  }
+}
+
+// ─── TEMPLATES ───────────────────────────────────────────────────────────────
+var TEMPLATES=[{id:"researcher",emoji:"🔬",title:"The Researcher",subtitle:"Finds, verifies & synthesizes data",outputs:"Fact sheets, summaries, competitive analysis, background intelligence",color:"#7C9A92",prefill:{skillName:"The Researcher",coreFunction:"Enables Claude to find, verify, and synthesize information from multiple sources into structured intelligence outputs including fact sheets, summaries, competitive analyses, and background reports.",goals:"Produce accurate, source-grounded research outputs with clear attribution | Synthesize fragmented information into concise, scannable deliverables | Distinguish verified facts from unverified claims and flag uncertainty | Adapt research depth and format to the user's stated or implied purpose",tone:"Precise, neutral, and credibility-focused. Communicates like a senior analyst — confident in findings, transparent about gaps. Avoids opinion unless explicitly asked. Uses structured formatting to aid scanning.",workflow:"1. Clarify the research goal, audience, and required output format\n2. Identify key questions the research must answer\n3. Search and retrieve relevant sources; prioritize primary over secondary\n4. Verify key claims across at least two independent sources\n5. Synthesize findings into the requested format (fact sheet, summary, etc.)\n6. Flag any unverified claims, conflicting data, or knowledge gaps explicitly\n7. Cite sources inline or in a reference block at the end",constraints:"Always:\n- Attribute claims to sources; never present unverified info as fact\n- Flag conflicting information rather than silently picking one version\n- State confidence level when data is incomplete or contested\nNever:\n- Fabricate citations, statistics, or quotes\n- Present AI-generated inference as researched fact\n- Omit contradicting evidence to make findings appear cleaner",examples:"User: Give me a competitive analysis of Notion vs Obsidian for team knowledge management\nClaude: [Structured comparison across: target user, collaboration features, pricing, extensibility, offline support — with source attributions and a verdict section noting confidence level on each claim]"}},{id:"strategist",emoji:"♟️",title:"The Strategist",subtitle:"Maps high-level plans & frameworks",outputs:"Project roadmaps, business strategies, decision trees",color:"#8B7EA8",prefill:{skillName:"The Strategist",coreFunction:"Enables Claude to design high-level plans, frameworks, and decision structures including project roadmaps, business strategies, prioritization matrices, and decision trees for complex goals.",goals:"Translate ambiguous goals into concrete, sequenced action frameworks | Surface trade-offs, risks, and dependencies the user may not have considered | Produce decision-ready outputs that can be acted on immediately | Adapt strategic depth to the user's context (solo founder vs enterprise team)",tone:"Direct, structured, and thinking-partner energy. Like a trusted advisor who challenges assumptions respectfully. Uses frameworks to clarify, not to impress. Asks sharp clarifying questions before planning.",workflow:"1. Understand the goal, constraints, timeline, and stakeholders\n2. Identify the core decision or problem the strategy must resolve\n3. Map key assumptions and risks before recommending any path\n4. Generate 2-3 strategic options with trade-offs, not just one answer\n5. Recommend a preferred path with explicit reasoning\n6. Structure the output as roadmap, matrix, or decision tree as appropriate\n7. Flag what would change the recommendation (trigger conditions)",constraints:"Always:\n- Present trade-offs honestly; never oversell one path\n- State assumptions explicitly so user can challenge them\n- Acknowledge when a strategy requires information Claude doesn't have\nNever:\n- Produce a single-option plan without acknowledging alternatives\n- Make financial or legal recommendations without flagging professional advice caveat\n- Ignore stated constraints (budget, time, team size) in the strategy",examples:"User: I want to launch a SaaS product in 90 days with a 2-person team and no budget\nClaude: [90-day phased roadmap with: Week 1-2 validation sprint, Week 3-6 MVP scope, Week 7-10 soft launch, Week 11-13 iteration loop — with risk flags and a \"what to cut if behind\" decision tree]"}},{id:"architect",emoji:"🏗️",title:"The Architect",subtitle:"Designs systems, databases & blueprints",outputs:"Code structures, file directories, system architectures",color:"#7A8FA6",prefill:{skillName:"The Architect",coreFunction:"Enables Claude to design and document technical systems, database schemas, code structures, file hierarchies, and system architectures with clear component relationships and implementation guidance.",goals:"Produce unambiguous technical blueprints that developers can implement directly | Surface scalability, security, and maintainability considerations upfront | Translate business requirements into technical design decisions | Document component relationships, data flows, and interface contracts",tone:"Precise, technical, and implementation-focused. Like a staff engineer doing a design review — thorough without being pedantic. Uses diagrams, pseudocode, and structured specs. Adapts jargon depth to the user's apparent technical level.",workflow:"1. Gather requirements: scale, tech stack, team size, existing constraints\n2. Identify core components and their responsibilities\n3. Map data flows and component interactions\n4. Define interface contracts (APIs, schemas, event signatures)\n5. Flag architectural risks (single points of failure, scaling bottlenecks)\n6. Produce the blueprint in the appropriate format (diagram, schema, spec doc)\n7. Include a 'decisions log' noting why key choices were made",constraints:"Always:\n- Note when a design choice has significant security implications\n- Flag when a proposed architecture won't scale to stated requirements\n- Separate 'required now' from 'recommended later' in the design\nNever:\n- Produce architecture that ignores stated tech stack constraints\n- Omit error handling or failure modes from system designs\n- Present one architecture as the only valid option without context",examples:"User: Design a database schema for a multi-tenant SaaS app with user roles\nClaude: [PostgreSQL schema with: tenants, users, roles, permissions tables — with foreign keys, indexes, RLS policy notes, and a decisions log explaining the row-level security approach vs separate schemas trade-off]"}},{id:"creator",emoji:"📝",title:"The Creator",subtitle:"Drafts original text & creative concepts",outputs:"Articles, emails, video scripts, brainstorming ideas",color:"#A8896B",prefill:{skillName:"The Creator",coreFunction:"Enables Claude to generate original written content and creative concepts including articles, emails, video scripts, social posts, campaign ideas, and brainstorming outputs tailored to brand voice and audience.",goals:"Produce original, audience-specific content that achieves a clear communication goal | Match or develop a consistent brand voice across content types | Generate creative concepts that are novel, not templated or generic | Deliver content ready for use with minimal editing required",tone:"Adaptive and imaginative — mirrors the user's intended voice, not Claude's default style. Asks about audience and goal before writing. Brings creative energy without overriding the user's vision.",workflow:"1. Clarify: content type, target audience, goal, platform, word count, tone\n2. Ask for brand voice samples or style references if not provided\n3. Identify the single core message the content must land\n4. Draft the content with that core message as the anchor\n5. Review for audience fit, tone consistency, and goal alignment\n6. Offer 1-2 alternative angles or headlines if applicable\n7. Deliver final content with brief notes on key creative decisions",constraints:"Always:\n- Confirm the core message before writing long-form content\n- Stay within platform constraints (character limits, format norms)\n- Respect stated brand voice — don't impose Claude's default style\nNever:\n- Plagiarize or closely mirror existing published content\n- Generate misleading claims in marketing or ad copy\n- Skip audience/goal clarification for complex content types",examples:"User: Write a LinkedIn post announcing our product launch, casual tone, under 200 words\nClaude: [Hook line \u2192 problem statement \u2192 product intro \u2192 one key benefit \u2192 CTA — written in first person, conversational, no buzzwords, with an alternative hook offered at the end]"}},{id:"editor",emoji:"📝",title:"The Editor",subtitle:"Polishes, formats & debugs",outputs:"Code debugging, grammar corrections, style compliance",color:"#6B9B7E",prefill:{skillName:"The Editor",coreFunction:"Enables Claude to review, refine, and correct existing content and code — fixing grammar, style, formatting, logic errors, and consistency issues while preserving the author's original intent and voice.",goals:"Improve clarity, correctness, and consistency without rewriting the author's voice | Catch and explain errors (grammar, logic, code bugs) with clear reasoning | Enforce style guide or formatting rules when provided | Return edited output with change tracking or inline annotations when useful",tone:"Constructive, specific, and non-condescending. Like a skilled copy editor or code reviewer — explains the why behind every change. Never rewrites more than necessary. Praises what works, fixes what doesn't.",workflow:"1. Identify the content type and editing goal (grammar, style, logic, formatting)\n2. Ask for style guide or constraints if not provided\n3. Do a full-pass read before making any changes\n4. Edit in priority order: correctness \u2192 clarity \u2192 style \u2192 polish\n5. Annotate significant changes with brief explanations\n6. Return the edited version with a summary of key changes made\n7. Flag subjective decisions and offer alternatives where applicable",constraints:"Always:\n- Preserve the author's voice — edit, don't rewrite\n- Explain changes, especially non-obvious ones\n- Flag when a passage is unclear due to missing context, not just bad writing\nNever:\n- Change the author's meaning without flagging it\n- Apply style changes without being asked (unless style guide provided)\n- Return edits without any explanation of what changed",examples:"User: Edit this paragraph for clarity and fix any grammar issues [paragraph]\nClaude: [Edited paragraph with tracked changes indicated inline, followed by a 3-bullet summary: \"Changed X because Y\", \"Restructured Z for flow\", \"Flagged this sentence — unclear if you mean A or B\"]"}},{id:"analyst",emoji:"📊",title:"The Analyst",subtitle:"Interprets numbers, patterns & metrics",outputs:"Performance trends, financial insights, user behavior analysis",color:"#7B8FA8",prefill:{skillName:"The Analyst",coreFunction:"Enables Claude to interpret numerical data, identify patterns and anomalies, and produce structured analytical outputs including trend analyses, financial summaries, performance diagnostics, and behavioral insights.",goals:"Extract meaningful signal from raw data with clear methodology | Communicate findings in plain language tied to business or user impact | Surface anomalies, outliers, and risks the user may have missed | Produce analysis that leads to a decision, not just a description",tone:"Rigorous, plain-spoken, and insight-forward. Like a data analyst presenting to a non-technical stakeholder — leads with the \"so what\", backs it with the numbers. Avoids jargon unless user is clearly technical.",workflow:"1. Understand the analysis goal and decision it needs to inform\n2. Assess data quality: completeness, format, obvious errors\n3. Identify the key metrics and dimensions relevant to the goal\n4. Perform the analysis; note methodology briefly\n5. Lead findings with insight, not raw numbers\n6. Flag data limitations, anomalies, or confidence issues\n7. Close with a recommendation or decision implication where appropriate",constraints:"Always:\n- Lead with the insight, support with data — never the reverse\n- Flag data quality issues before drawing conclusions\n- State confidence level when sample size or data completeness is limited\nNever:\n- Fabricate data points or extrapolate beyond what data supports\n- Present correlation as causation without flagging the distinction\n- Produce analysis without tying it to a decision or action",examples:"User: Here's our monthly revenue data for the last 12 months. What's happening?\nClaude: [3-sentence insight summary \u2192 trend chart description \u2192 anomaly callout (\"August dip: -23%, coincides with pricing change\") \u2192 2 hypotheses \u2192 recommended next analysis to confirm]"}},{id:"educator",emoji:"📖",title:"The Educator",subtitle:"Simplifies complex ideas for any audience",outputs:"Tutorials, user guides, metaphors, onboarding docs",color:"#A89B6B",prefill:{skillName:"The Educator",coreFunction:"Enables Claude to explain complex concepts, skills, and processes to any audience through tutorials, guides, analogies, and structured onboarding content calibrated to the learner's level.",goals:"Make difficult concepts genuinely understandable, not just summarized | Calibrate explanation depth and vocabulary to the learner's level | Produce content the learner can act on or build from immediately | Use examples, analogies, and progressive disclosure to anchor new knowledge",tone:"Warm, patient, and confidence-building. Like the best teacher you ever had — never condescending, never assumes too much. Uses \"we\" to include the learner. Celebrates small understanding wins. Checks comprehension before moving forward.",workflow:"1. Identify the concept to teach and the learner's current knowledge level\n2. Define the learning outcome: what should the learner be able to DO after?\n3. Start with the simplest true version of the concept (don't oversimplify to wrong)\n4. Build up with one layer of complexity at a time\n5. Anchor each new concept with a concrete example or analogy\n6. Check understanding with a question or mini-exercise before proceeding\n7. Provide a summary and suggest what to learn next",constraints:"Always:\n- Check learner level before choosing vocabulary and depth\n- Use at least one concrete example per concept introduced\n- Correct misconceptions directly but kindly\nNever:\n- Teach a simplified version that is actually wrong (simplify without distorting)\n- Overwhelm with multiple new concepts in a single explanation\n- Skip the \"why does this matter\" framing for abstract concepts",examples:"User: Explain how DNS works to someone who knows nothing about networking\nClaude: [Analogy: DNS is like a phone book for the internet \u2192 step-by-step journey of a URL lookup \u2192 what each component does in plain English \u2192 one-sentence summary \u2192 \"Want me to explain what happens when DNS fails?\"]"}},{id:"simulator",emoji:"🔍",title:"The Simulator",subtitle:"Roleplays scenarios & stress-tests ideas",outputs:"Mock interviews, software testing, crisis response",color:"#9B7EA8",prefill:{skillName:"The Simulator",coreFunction:"Enables Claude to roleplay realistic scenarios, stress-test ideas, and simulate responses from people, systems, or situations — including mock interviews, adversarial reviews, crisis simulations, and QA testing.",goals:"Create realistic, high-fidelity simulations that produce genuine preparedness | Surface weaknesses, edge cases, and failure modes through adversarial pressure | Maintain consistent persona or system behavior throughout the simulation | Debrief after simulation with specific, actionable improvement notes",tone:"Fully committed to the simulation while meta-aware. In-character during the scenario, constructively analytical in debrief. Calibrates pressure level to user's stated goal (practice vs stress-test vs worst-case).",workflow:"1. Clarify simulation type, scenario parameters, and pressure level desired\n2. Define the persona or system being simulated (interviewer, user, adversary, etc.)\n3. Set the scene with brief context so user knows what they're walking into\n4. Run the simulation — stay fully in character, respond realistically\n5. If user breaks frame for help \u2192 pause simulation, assist, resume on request\n6. After simulation ends \u2192 deliver structured debrief: what worked, what didn't, why\n7. Offer to re-run the hardest moments with coaching",constraints:"Always:\n- Clarify simulation parameters before starting — never guess the scenario\n- Break character immediately if user signals genuine distress\n- Keep debrief specific and evidence-based, not vaguely encouraging\nNever:\n- Simulate scenarios designed to produce genuinely harmful outputs under cover of roleplay\n- Stay in character when user clearly needs real help\n- Give only positive debrief feedback — the value is in finding the gaps",examples:"User: Be a tough technical interviewer for a senior backend engineer role, focus on system design\nClaude: [In-character: \"Walk me through how you'd design a URL shortener that handles 10 billion requests per day.\" — followed by 3 follow-up pressure questions — then debrief: \"You handled scale well but skipped failure modes entirely. Here's how to fix that.\"]"}}];
+
+// ─── PARTICLES BACKGROUND ────────────────────────────────────────────────────
+function ParticleField(){
+  var canvasRef=useRef(null);
+  useEffect(function(){
+    var canvas=canvasRef.current;
+    var ctx=canvas.getContext("2d");
+    var animId,particles=[];
+    function resize(){canvas.width=canvas.offsetWidth;canvas.height=canvas.offsetHeight}
+    resize();window.addEventListener("resize",resize);
+    for(var i=0;i<55;i++)particles.push({x:Math.random()*canvas.width,y:Math.random()*canvas.height,r:Math.random()*2+0.5,dx:(Math.random()-0.5)*0.3,dy:(Math.random()-0.5)*0.3,opacity:Math.random()*0.4+0.1});
+    function draw(){ctx.clearRect(0,0,canvas.width,canvas.height);particles.forEach(function(p){ctx.beginPath();ctx.arc(p.x,p.y,p.r,0,Math.PI*2);ctx.fillStyle='rgba(160,140,120,'+p.opacity+')';ctx.fill();p.x+=p.dx;p.y+=p.dy;if(p.x<0||p.x>canvas.width)p.dx*=-1;if(p.y<0||p.y>canvas.height)p.dy*=-1});animId=requestAnimationFrame(draw)}
+    draw();return function(){cancelAnimationFrame(animId);window.removeEventListener("resize",resize)}
+  },[]);
+  return h("canvas",{ref:canvasRef,style:{position:"absolute",inset:0,width:"100%",height:"100%",pointerEvents:"none",zIndex:0}})
+}
+
+// ─── FLOATING FRAGMENTS ──────────────────────────────────────────────────────
+var FRAGMENTS=["## Core Function\nFinds, verifies, synthesizes…","```yaml\nskill: researcher\nmodel: claude\n```","**Trigger:** When user asks\nto research or verify…","### Outputs\n- Fact sheets\n- Summaries\n- Analysis","```\nworkflow:\n  1. Clarify\n  2. Synthesize\n```","## Constraints\nAlways cite sources.\nNever fabricate."];
+function FloatingFragment(p){return h("div",{style:{position:"absolute",background:"rgba(255,253,248,0.55)",backdropFilter:"blur(12px)",border:"1px solid rgba(200,185,165,0.3)",borderRadius:12,padding:"10px 14px",fontSize:10,fontFamily:"'Courier New', monospace",color:"#8A7A6A",lineHeight:1.6,whiteSpace:"pre",maxWidth:180,boxShadow:"0 4px 24px rgba(160,140,120,0.1)",pointerEvents:"none",...p.style}},p.text)}
+
+// ─── GENERATE VARIATIONS ─────────────────────────────────────────────────────
+async function generateVariations(description){
+  var system=(`You are a Claude skill specification extractor for a visual skill builder.
+Your job: take a user's freeform description and generate exactly 5 different
+interpretations as a JSON array — each at PRODUCTION QUALITY with the same depth
+and density a senior prompt engineer would write, not a quick summary.
+
+═══════════════════════════════════════════
+CORE RULES
+═══════════════════════════════════════════
+
+RULE 1 — EXTRACT FIRST, INFER SECOND
+Priority order for every field:
+  1st: Extract directly from user input (exact signal)
+  2nd: Infer from strong implication in user input
+  3rd: Derive intelligently from Skill Name + Core Function + Goals + domain
+Never leave a field empty. Always produce usable content.
+
+RULE 2 — MARK INFERRED CONTENT
+- Directly extracted -> no marker
+- Inferred from implication -> mark [~]
+- Derived from domain/name/function with no user signal -> mark [~]
+User's builder UI will highlight [~] content so they know what to verify.
+
+RULE 3 — INFERENCE QUALITY BAR
+Inferred content must pass this test:
+"Would a domain expert reviewing this skill say this is a reasonable default?"
+If no -> derive differently until it passes.
+Inferred content must NOT be:
+- Generic Claude behavior ("be helpful", "be accurate")
+- Applicable to any skill regardless of domain
+- A placeholder ("add your constraints here")
+It MUST be:
+- Specific to this skill's domain and function
+- Something the user would likely keep with minor edits
+- Grounded in what the skill name + core function imply
+
+RULE 4 — SPECIFICITY OVER GENERICISM
+Every value must be specific to THIS skill.
+If same text could describe any Claude skill -> too generic -> rewrite tighter.
+Bad: "Helps users with their tasks efficiently"
+Good: "Enables Claude to transform raw bullet-point notes into publication-ready
+LinkedIn posts with consistent brand voice and platform-appropriate formatting"
+
+RULE 5 — ACTIVE SCANNING FOR OPTIONAL FIELDS
+Scan user input for buried signals before inferring:
+- Tone: adjectives, comparisons ("like a senior dev"), audience mentions,
+  emotional cues ("friendly", "strict", "no-nonsense")
+- Constraints: domain type, words like "never/always/only/must/don't/avoid"
+- Workflow: sequence words ("first/then/after/finally/check/verify/review/output")
+- Examples: any "user asks X / Claude should Y" patterns, even loosely phrased
+
+RULE 6 — DOMAIN AUTO-CONSTRAINTS
+These domains always trigger specific constraints even with zero user signal:
+medical, legal, financial advice, security/auth, content moderation,
+minors, destructive/irreversible operations, PII handling.
+Add appropriate domain constraints, mark [~auto].
+
+RULE 7 — ASSUMPTION TRANSPARENCY
+List every inference in ASSUMPTIONS block at top.
+Zero inferences -> write: ASSUMPTIONS: none
+
+═══════════════════════════════════════════
+OUTPUT DENSITY RULES
+═══════════════════════════════════════════
+
+── FIELD 1: SKILL NAME ──
+- Title Case, 2-5 words
+- Must communicate unique identity, not just category
+- Bad: "Writing Helper" | Good: "Technical Blog Ghostwriter"
+- If user gave a name -> clean it to Title Case
+- If no name given -> derive from Core Function, mark [~]
+
+── FIELD 2: CORE FUNCTION ──
+- Single sentence, strictly verb-first
+- Template: "Enables Claude to [specific action] on/from/for [specific subject]
+  producing [specific output type]"
+- Must pass uniqueness test: same sentence cannot describe a different skill
+- Weak: "Enables Claude to help with writing tasks"
+- Strong: "Enables Claude to transform raw bullet-point notes into publication-ready
+  LinkedIn posts with consistent brand voice and platform-appropriate formatting"
+- If thin user description -> expand from domain knowledge, mark [~]
+
+── FIELD 3: GOALS & OBJECTIVES ──
+Target: 4 bullets (minimum 3)
+Each bullet MUST:
+- Start with action verb (Produce, Ensure, Surface, Deliver, Translate, Generate)
+- Name a SPECIFIC outcome tied to this skill's domain
+- Follow pattern: "[Verb] [specific output] so that [specific user benefit]"
+  OR "[Verb] [specific behavior] when [specific condition]"
+- Pass test: "could this goal appear in a generic Claude assistant skill?" -> NO
+
+If user gave fewer than 3 goals -> derive remainder from Core Function + domain, mark [~]
+
+Bad: "Help users accomplish their tasks"
+Good: "Surface scalability and security risks in proposed architectures
+  before implementation begins, so critical decisions aren't made blind"
+
+── FIELD 4: TONE & VOICE ──
+Target: 4-5 sentences covering ALL of:
+a) Core style adjectives (2-3 defining words)
+b) Role archetype ("senior analyst", "patient teacher", "trusted advisor")
+c) What this voice actively DOES ("asks sharp clarifying questions before planning")
+d) What this voice deliberately AVOIDS ("never condescending", "avoids jargon
+   unless user signals technical fluency")
+e) How it adapts to different user types
+
+If user gave tone signal -> extract and expand to hit all 5 elements
+If no tone signal -> derive from skill domain and function, mark full block [~]
+Example derivation: a code debugging skill -> "Precise and technically direct,
+like a senior engineer doing a code review..."
+NEVER leave this as a generic "be helpful and friendly" block.
+
+── FIELD 5: WORKFLOW STEPS ──
+Target: 6-8 steps (hard max 10)
+Each step MUST:
+- Start with imperative verb (Clarify, Identify, Map, Generate, Review, Deliver, Flag)
+- Have TWO parts: what to do + why/what it prevents
+- Be specific enough two people execute it identically
+- Be ordered by logical dependency
+
+Bad: "Review the content"
+Good: "Review output for audience fit, tone consistency, and goal alignment -
+  catch drift from the core message before delivery"
+
+If user gave steps -> clean, expand, reorder by dependency
+If no steps -> DERIVE full workflow from Core Function + Goals, mark all [~]
+NEVER leave this field empty or thin - this is the most important field.
+
+── FIELD 6: CONSTRAINTS & SAFETY ──
+Target: 3 Always + 3 Never rules minimum
+Each rule MUST:
+- Be specific to THIS skill's actual failure modes
+- Name the harm or quality problem it prevents
+- Be actionable: reader knows exactly what to do/avoid
+
+If user gave constraints -> extract and expand to hit density target
+If no constraints -> derive from skill domain's known failure modes, mark [~]
+If risky domain -> add domain constraints, mark [~auto]
+
+Bad: "Always be helpful and accurate"
+Good: "Always flag when a data conclusion exceeds what the sample
+  size can support - state confidence level explicitly"
+
+Bad: "Never say harmful things"
+Good: "Never present correlation as causation without marking
+  the distinction clearly in the output"
+
+── FIELD 7: EXAMPLE INTERACTIONS ──
+Target: 2 complete pairs
+Each pair MUST show:
+- A realistic specific user prompt (not "help me with X")
+- Claude response showing: output structure + skill-specific decision +
+  something a generic response wouldn't do
+- Response can be abbreviated but must show enough to be instructive
+
+If user gave examples -> clean and expand to hit density target
+If no examples -> construct representative pairs from Core Function + domain, mark [~]
+NEVER leave this empty - examples are how users verify the skill works.
+
+═══════════════════════════════════════════
+OUTPUT FORMAT
+═══════════════════════════════════════════
+
+Return ONLY a JSON array of exactly 5 objects — no markdown fences, no text before or after.
+
+Each object in the array has these fields:
+  - "title": 2-5 word Title Case card name
+  - "approach": one of "analytical", "creative", "structured", "adaptive", "precise"
+  - "skillName": 2-5 word Title Case skill name
+  - "coreFunction": single sentence verb-first starting with "Enables Claude to"
+  - "goals": 3-4 action-verb goals separated by " | "
+  - "tone": 4-5 sentences covering all 5 tone elements
+  - "workflow": 6-8 imperative steps with what + why separated by " | "
+  - "constraints": Always/Never rules separated by " | ", minimum 3+3
+  - "examples": 1-2 User/Claude pairs separated by " ||| "
+
+Each of the 5 objects must be a distinctly different interpretation — different angle, emphasis, or framing of the user's description.
+
+═══════════════════════════════════════════
+SELF-CHECK (verify for all 5 JSON objects before outputting)
+═══════════════════════════════════════════
+
+□ Zero empty fields — every field in every object has real, dense content
+□ All 5 approaches are distinct interpretations
+□ All inferred content marked [~] so builder can highlight it
+□ Field 2: names specific action AND specific output type
+□ Field 3: all goals pass "not generic" test — domain-specific outcomes only
+□ Field 4: covers all 5 tone elements (style, archetype, active behaviors, avoids, adaptation)
+□ Field 5: every step has verb + what + why, ordered by dependency, min 6 steps
+□ Field 6: constraints name actual failure modes of THIS skill, not generic Claude rules
+□ Field 7: both examples show skill-specific structure a generic response wouldn't show
+□ Output is ONLY the JSON array — no preamble, no explanation
+
+═══════════════════════════════════════════
+USER INPUT:
+{{user_description}}
+═══════════════════════════════════════════`).replace('{{user_description}}', description);
+  try{
+    var raw=await callAI(system,"Generate.");
+    console.warn("AI RAW:",raw);
+    var start=raw.indexOf("["),end=raw.lastIndexOf("]");
+    if(start>=0&&end>start){
+      var json=raw.substring(start,end+1);
+      var parsed=JSON.parse(json);
+      if(Array.isArray(parsed)&&parsed.length>=1)return parsed.slice(0,5);
+    }
+    var m=raw.match(/\[[\s\S]*\]/);
+    if(m)try{var alt=JSON.parse(m[0]);if(Array.isArray(alt)&&alt.length)return alt.slice(0,5)}catch(e2){}
+    throw new Error("No valid JSON array");
+  }catch(e){
+    console.warn("PARSE ERROR:",e.message,"RAW:",raw);
+    return[0,1,2,3,4].map(function(i){return{title:"Variation "+(i+1),approach:["analytical","creative","structured","adaptive","precise"][i],skillName:"Extracted Skill",coreFunction:"Enables Claude to handle: "+description,goals:"Understand user intent | Process the request | Deliver output",tone:"NULL",workflow:"NULL",constraints:"NULL",examples:"NULL"}})
+  }
+}
+
+// ─── GENERATE SKILL.MD ───────────────────────────────────────────────────────
+async function generateSkillMD(fields){
+  var tmpl=document.getElementById("skill-prompt-template").textContent;
+  var replacements={skill_name:fields.skillName||"",core_function:fields.coreFunction||"",goals:fields.goals||"",tone_voice:fields.tone||"",workflow_steps:fields.workflow||"",constraints:fields.constraints||"",examples:fields.examples||"",output_types:fields.outputs||""};
+  for(var k in replacements)tmpl=tmpl.replace(new RegExp("\\{\\{"+k+"\\}\\}","g"),replacements[k]);
+  return await callAI(tmpl,"Generate the Skill.MD now.");
+}
+
+// ─── DESCRIPTION OPTIMIZER ───────────────────────────────────────────────────
+// ─── HERO CARD ────────────────────────────────────────────────────────────────
+var HERO_IMGS={"Use Templates":"Template_Claude.png","Describe & Generate":"Generate_Claude.png","Write From Scratch":"Scratch_Claude.png"};
+function HeroCard(p){
+  var s=useState(false),hovered=s[0],setHovered=s[1];
+  return h("button",{onClick:p.disabled?undefined:p.onClick,disabled:p.disabled,onMouseEnter:function(){setHovered(true)},onMouseLeave:function(){setHovered(false)},style:{background:p.disabled?"rgba(200,190,180,0.5)":hovered?"rgba(255,253,248,0.92)":"rgba(255,253,248,0.7)",backdropFilter:"blur(16px)",border:"1px solid "+(hovered&&!p.disabled?"rgba(180,160,130,0.5)":"rgba(200,185,165,0.3)"),borderRadius:14,padding:"25px 22px",flexShrink:0,cursor:p.disabled?"not-allowed":"pointer",textAlign:"left",transition:"all 0.3s ease",transform:hovered&&!p.disabled?"translateY(-4px)":"translateY(0)",opacity:p.disabled?0.5:1,boxShadow:hovered&&!p.disabled?"0 12px 40px rgba(160,130,100,0.15)":"0 2px 12px rgba(160,130,100,0.06)",pointerEvents:p.disabled?"none":"auto"}},
+    h("img",{src:"ASSETS/"+HERO_IMGS[p.title],alt:p.title,style:{width:270,height:270,display:"block",borderRadius:11,marginBottom:11,marginLeft:"auto",marginRight:"auto"}}),
+    h("div",{style:{fontSize:"calc((1rem + 5px) * 0.9)",fontWeight:600,color:"#2C2318",marginBottom:5,fontFamily:"'Georgia', serif"}},p.title),
+    h("div",{style:{fontSize:"calc((0.82rem + 5px) * 0.9)",color:"#8A7A6A",lineHeight:1.5}},p.desc),
+    h("div",{style:{marginTop:14,fontSize:15,color:"#A8957F",display:"flex",alignItems:"center",gap:4}},"Get started ",h("span",{style:{transition:"transform 0.2s",transform:hovered?"translateX(4px)":"none"}},"→"))
+  )
+}
+
+// ─── TEMPLATE CARD ────────────────────────────────────────────────────────────
+function TemplateCard(p){
+  var s=useState(false),hovered=s[0],setHovered=s[1];var t=p.template;
+  return h("button",{onClick:p.disabled?undefined:p.onClick,disabled:p.disabled,onMouseEnter:function(){setHovered(true)},onMouseLeave:function(){setHovered(false)},style:{background:p.disabled?"rgba(200,190,180,0.5)":hovered?"rgba(255,253,248,0.95)":"rgba(255,253,248,0.65)",backdropFilter:"blur(14px)",border:"1px solid "+(hovered&&!p.disabled?t.color+"55":"rgba(200,185,165,0.25)"),borderRadius:14,padding:"22px",cursor:p.disabled?"not-allowed":"pointer",textAlign:"left",transition:"all 0.3s ease",transform:hovered&&!p.disabled?"translateY(-3px)":"none",opacity:p.disabled?0.5:1,boxShadow:hovered&&!p.disabled?"0 12px 36px "+t.color+"22":"0 2px 8px rgba(160,130,100,0.05)",pointerEvents:p.disabled?"none":"auto"}},
+    h("img",{src:"ASSETS/TE "+t.title.replace("The ","")+".png",alt:t.title,style:{width:270,height:270,display:"block",borderRadius:11,marginBottom:13,marginLeft:"auto",marginRight:"auto"}}),
+    h("div",{style:{fontSize:"calc((0.95rem + 5px) * 0.9)",fontWeight:600,color:"#2C2318",marginBottom:4,fontFamily:"'Georgia', serif"}},t.title),
+    h("div",{style:{fontSize:"calc((0.78rem + 5px) * 0.9)",color:t.color,marginBottom:9,fontWeight:500}},t.subtitle),
+    h("div",{style:{fontSize:"calc((0.75rem + 5px) * 0.9)",color:"#9A8A7A",lineHeight:1.55}},t.outputs)
+  )
+}
+
+// ─── SECTION HEADER ───────────────────────────────────────────────────────────
+function SectionHeader(p){
+  return h("div",{style:{marginBottom:8}},
+    h("div",{style:{fontSize:11,color:"#A8957F",letterSpacing:"0.1em",textTransform:"uppercase",marginBottom:12}},"✧ ",p.label),
+    h("h2",{style:{fontSize:"clamp(1.6rem,3vw,2.4rem)",fontWeight:400,color:"#2C2318",marginBottom:10,letterSpacing:"-0.02em"}},p.title),
+    h("p",{style:{color:"#8A7A6A",fontSize:"0.95rem",lineHeight:1.6,fontVariantNumeric:"lining-nums"}},p.sub)
+  )
+}
+
+// ─── DESCRIBE FLOW ────────────────────────────────────────────────────────────
+function DescribeFlow(p){
+  var s1=useState(""),text=s1[0],setText=s1[1];
+  var s2=useState(false),loading=s2[0],setLoading=s2[1];
+  var s3=useState([]),variations=s3[0],setVariations=s3[1];
+  var s4=useState(""),error=s4[0],setError=s4[1];
+  var s5=useState(0),elapsed=s5[0],setElapsed=s5[1];
+  async function generate(){
+    if(!text.trim())return;
+    if(!hasConfig()){setError("⚠️ API not configured. Click CONFIG to set up.");return}
+    setLoading(true);setVariations([]);setError("");setElapsed(0);
+    var timer=setInterval(function(){setElapsed(function(s){return s+1})},1000);
+    try{var vars=await generateVariations(text);setVariations(vars)}
+    catch(e){setError("Generation failed: "+e.message)}
+    clearInterval(timer);
+    setLoading(false)
+  }
+  var APPROACH_COLORS={analytical:"#7B8FA8",creative:"#A8896B",structured:"#7C9A92",adaptive:"#8B7EA8",precise:"#6B9B7E",exploratory:"#9B7EA8"};
+  var disabled=p.disabled||!hasConfig();
+  return h("div",null,
+    h("div",{style:{position:"relative",marginBottom:24}},
+      h("textarea",{value:text,onChange:function(e){setText(e.target.value)},disabled:disabled,placeholder:disabled?"⚠️ Configure API first — click CONFIG...":"Describe your ideal Claude skill... e.g. 'A skill that helps me brainstorm startup ideas with structured frameworks and market validation steps'",
+        style:{width:"100%",minHeight:120,padding:"18px 20px",fontSize:"0.95rem",fontFamily:"'Georgia', serif",lineHeight:1.7,color:disabled?"#B0A090":"#2C2318",background:disabled?"rgba(230,220,210,0.5)":"rgba(255,253,248,0.8)",backdropFilter:"blur(12px)",border:"1px solid rgba(200,185,165,0.4)",borderRadius:14,resize:"vertical",outline:"none",boxSizing:"border-box"},
+        onFocus:function(e){if(!disabled)e.target.style.borderColor="rgba(160,130,100,0.6)"},onBlur:function(e){if(!disabled)e.target.style.borderColor="rgba(200,185,165,0.4)"}
+      }),
+      h("button",{onClick:disabled?undefined:generate,disabled:loading||!text.trim()||disabled,
+        style:{marginTop:12,padding:"12px 28px",background:loading||disabled?"#C8B8A8":"#3D2F22",color:"#FAF8F4",border:"none",borderRadius:99,fontSize:"0.88rem",cursor:loading||disabled?"not-allowed":"pointer",fontFamily:"'Georgia', serif",letterSpacing:"0.03em",transition:"all 0.2s",pointerEvents:disabled?"none":"auto"}
+      },loading?h("span",{style:{display:"flex",alignItems:"center",gap:10,justifyContent:"center"}},
+        h("span",{style:{width:20,height:20,border:"2px solid rgba(250,248,244,0.3)",borderTopColor:"#FAF8F4",borderRadius:"50%",display:"inline-block",animation:"spin .8s linear infinite",flexShrink:0}}),
+        h("span",{style:{fontVariantNumeric:"tabular-nums"}},"Generating variations... ("+elapsed+"s)")
+      ):"✧ Generate 5 Variations")
+    ),
+    error?h("div",{style:{color:"#B07060",fontSize:14,marginBottom:16}},error):null,
+    variations.length>0?h("div",{style:{width:"100vw",marginLeft:"calc(-50vw + 50%)",overflow:"hidden"}},
+      h("div",{style:{display:"flex",gap:20,overflowX:"auto",padding:"4px 20px 16px",scrollSnapType:"x mandatory"}},
+        variations.map(function(v,i){
+          var col=APPROACH_COLORS[v.approach]||"#8A7A6A";
+          return h(VariationBlock,{variation:v,color:col,index:i,onSelect:function(){p.onSelect({skillName:v.skillName,coreFunction:v.coreFunction,goals:v.goals,tone:v.tone,outputs:"",constraints:v.constraints,workflow:v.workflow,examples:v.examples})}})
+        })
+      )
+    ):null
+  )
+}
+function VariationBlock(p){
+  var s=useState(false),hovered=s[0],setHovered=s[1];
+  var v=p.variation;
+  var label={fontSize:9,color:"#B0A090",letterSpacing:"0.12em",textTransform:"uppercase",fontWeight:600,marginBottom:3};
+  var value={fontSize:"0.78rem",color:"#5A4A3A",lineHeight:1.55,whiteSpace:"pre-wrap"};
+  var section={marginBottom:16};
+  var row={marginBottom:14};
+  return h("div",{onMouseEnter:function(){setHovered(true)},onMouseLeave:function(){setHovered(false)},onClick:p.onSelect,
+    style:{minWidth:320,maxWidth:360,flexShrink:0,scrollSnapAlign:"start",background:hovered?"rgba(255,253,248,0.85)":"rgba(255,253,248,0.6)",backdropFilter:"blur(16px)",WebkitBackdropFilter:"blur(16px)",border:"1px solid "+(hovered?p.color+"66":"rgba(200,185,165,0.25)"),borderRadius:16,padding:"20px",cursor:"pointer",transition:"all 0.3s",transform:hovered?"translateY(-3px)":"none",boxShadow:hovered?"0 12px 36px "+p.color+"20":"0 2px 8px rgba(160,140,120,0.08)",animationName:"fadeInUp",animationDuration:"0.5s",animationTimingFunction:"ease",animationFillMode:"forwards",animationDelay:((p.index||0)*0.5)+"s"}
+  },
+    h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:18}},
+      h("div",{style:{fontSize:"0.95rem",fontWeight:600,color:"#2C2318",fontFamily:"'Georgia', serif"}},v.title),
+      h("span",{style:{fontSize:9,background:p.color+"22",color:p.color,padding:"2px 10px",borderRadius:99,fontWeight:600,whiteSpace:"nowrap"}},v.approach)
+    ),
+    v.coreFunction?h("div",{style:section},h("div",{style:label},"Core Function"),h("div",{style:value},v.coreFunction)):null,
+    v.goals?h("div",{style:section},h("div",{style:label},"Goals & Objectives"),h("div",{style:value},v.goals)):null,
+    v.tone&&v.tone!="NULL"?h("div",{style:section},h("div",{style:label},"Tone & Voice"),h("div",{style:value},v.tone)):null,
+    v.constraints&&v.constraints!="NULL"?h("div",{style:section},h("div",{style:label},"Constraints & Safety"),h("div",{style:value},v.constraints)):null,
+    hovered?h("div",{style:{marginTop:4,textAlign:"center",fontSize:11,color:p.color,fontWeight:600,letterSpacing:"0.04em"}},"Select this variation →"):null
+  )
+}
+
+// ─── FIELD BLOCK ──────────────────────────────────────────────────────────────
+function FieldBlock(p){
+  var filled=(p.value||"").trim().length>0;
+  var dotColor=null;
+  if(p.field.mandatory&&!filled)dotColor="#C07A6A";
+  else if(filled)dotColor="#6B9B7E";
+  return h("div",{style:{marginBottom:28}},
+    h("div",{style:{display:"flex",alignItems:"center",gap:8,marginBottom:6}},
+      h("label",{style:{fontSize:"0.82rem",fontWeight:600,color:p.active?"#5A4A3A":"#4A3A2A",transition:"color 0.2s"}},p.field.label),
+      dotColor?h("span",{style:{width:6,height:6,borderRadius:"50%",background:dotColor,display:"inline-block",transition:"background 0.3s"}}):null
+    ),
+    h("div",{style:{fontSize:"0.72rem",color:"#A8957F",marginBottom:8}},p.field.hint),
+    p.field.multiline
+      ?h("textarea",{value:p.value,onChange:function(e){p.onChange(e.target.value)},onFocus:p.onFocus,onBlur:p.onBlur,placeholder:p.field.placeholder,rows:4,
+          style:{width:"100%",padding:"12px 14px",fontFamily:"'Georgia', serif",fontSize:"0.85rem",lineHeight:1.7,color:"#2C2318",background:p.active?"rgba(255,253,248,0.95)":"rgba(255,253,248,0.7)",backdropFilter:"blur(8px)",border:"1px solid "+(p.active?"rgba(160,130,100,0.5)":"rgba(200,185,165,0.35)"),borderRadius:10,resize:"vertical",outline:"none",transition:"all 0.2s",boxSizing:"border-box"}
+        })
+      :h("input",{type:"text",value:p.value,onChange:function(e){p.onChange(e.target.value)},onFocus:p.onFocus,onBlur:p.onBlur,placeholder:p.field.placeholder,
+          style:{width:"100%",padding:"12px 14px",fontFamily:"'Georgia', serif",fontSize:"0.85rem",color:"#2C2318",background:p.active?"rgba(255,253,248,0.95)":"rgba(255,253,248,0.7)",backdropFilter:"blur(8px)",border:"1px solid "+(p.active?"rgba(160,130,100,0.5)":"rgba(200,185,165,0.35)"),borderRadius:10,outline:"none",transition:"all 0.2s",boxSizing:"border-box"}
+        })
+  )
+}
+
+// ─── HIGHLIGHTED MARKDOWN ─────────────────────────────────────────────────────
+function HighlightedMarkdown(p){
+  var lines=p.text.split("\n");
+  return h(Fragment,null,lines.map(function(line,i){
+    var color="#4A3A2A";
+    if(line.startsWith("# "))color="#2C1A0E";else if(line.startsWith("## "))color="#3D2A1A";else if(line.startsWith("### "))color="#5A3A25";else if(line.startsWith("---"))color="#C0A880";else if(line.startsWith("```"))color="#8A7060";else if(line.startsWith("- ")||line.match(/^\d+\./))color="#3A4A5A";else if(line.startsWith(">"))color="#7A8A6A";
+    var bold=line.startsWith("**")||line.startsWith("## ")||line.startsWith("# ");
+    return h("span",{key:i,style:{display:"block",color,fontWeight:bold?600:400,fontFamily:(line.startsWith("```")||line.startsWith("    "))?"'Courier New', monospace":undefined}},line||"\u00A0")
+  }))
+}
+
+
+
+function SmallBtn(p){
+  var s=useState(false),hovered=s[0],setHovered=s[1];
+  return h("button",{onClick:p.onClick,disabled:p.disabled,onMouseEnter:function(){setHovered(true)},onMouseLeave:function(){setHovered(false)},
+    style:{padding:"7px 14px",fontSize:"0.78rem",fontFamily:"'Georgia', serif",borderRadius:99,border:p.primary?"none":"1px solid rgba(200,185,165,0.4)",background:p.primary?(p.disabled?"#C0B0A0":hovered?"#2C2318":"#3D2F22"):hovered?"rgba(255,253,248,0.95)":"rgba(255,253,248,0.7)",color:p.primary?"#FAF8F4":"#5A4A3A",cursor:p.disabled?"not-allowed":"pointer",transition:"all 0.2s",backdropFilter:"blur(8px)"}
+  },p.children)
+}
+
+
+var FIELDS_DEF=[{key:"skillName",label:"Skill Name",placeholder:"e.g. The Strategist",hint:"A clear, memorable name for this skill",multiline:false,mandatory:true},{key:"coreFunction",label:"Core Function",placeholder:"What does this skill fundamentally do?",hint:"The single clearest description of what this skill enables Claude to do",multiline:true,mandatory:true},{key:"goals",label:"Goals & Objectives",placeholder:"What should Claude achieve when using this skill?",hint:"List 2-4 primary goals this skill serves",multiline:true,mandatory:true},{key:"tone",label:"Tone & Voice",placeholder:"e.g. Precise, analytical, supportive, executive...",hint:"Describe the communication style and personality",multiline:false},{key:"workflow",label:"Workflow Steps",placeholder:"1. Clarify scope\n2. Analyze\n3. Synthesize\n4. Present",hint:"Numbered steps Claude should follow when executing this skill",multiline:true},{key:"constraints",label:"Constraints & Safety",placeholder:"e.g. Always cite sources. Never fabricate data.",hint:"Rules Claude must follow — what to always do and never do",multiline:true},{key:"examples",label:"Example Interactions",placeholder:"User: ...\nAssistant: ...",hint:"Show one or two ideal prompt/response pairs",multiline:true},{key:"outputs",label:"Output Types",placeholder:"e.g. Reports, code, summaries, action plans...",hint:"What types of artifacts or outputs does this skill produce?",multiline:false}];
+
+function BuilderWizard(p){
+  var s1=useState(function(){var base={};FIELDS_DEF.forEach(function(f){base[f.key]=""});return{...base,...(p.initial||{})}});
+  var fields=s1[0],setFields=s1[1];
+  var s2=useState(""),preview=s2[0],setPreview=s2[1];
+  var s3=useState(false),generating=s3[0],setGenerating=s3[1];
+  var s4=useState(false),copied=s4[0],setCopied=s4[1];
+  var s5=useState(null),activeField=s5[0],setActiveField=s5[1];
+  var s6=useState({complexity:"",suggestRefs:false,reason:""}),metaInfo=s6[0],setMetaInfo=s6[1];
+  var previewRef=useRef(null);
+  async function generateFull(){
+    if(!hasConfig()){return}
+    setGenerating(true);setMetaInfo({complexity:"",suggestRefs:false,reason:""});
+    try{
+      var md=await generateSkillMD(fields);
+      var metaIdx=md.indexOf("<!--BUILDER_META");
+      if(metaIdx>=0){
+        setPreview(md.substring(0,metaIdx).trim());
+        var metaStr=md.substring(metaIdx).replace("<!--BUILDER_META","").replace("-->","").trim();
+        var c="",sr=false,r="";
+        var cm=metaStr.match(/complexity:\s*(\w+)/);if(cm)c=cm[1];
+        var rm=metaStr.match(/suggest_references:\s*(\w+)/);if(rm)sr=rm[1]==="true";
+        var rm2=metaStr.match(/reason:\s*(.+)/);if(rm2)r=rm2[1];
+        setMetaInfo({complexity:c,suggestRefs:sr,reason:r});
+      } else {
+        setPreview(md);setMetaInfo({complexity:"",suggestRefs:false,reason:""})
+      }
+    }
+    catch(e){setPreview("Generation failed: "+e.message);setMetaInfo({complexity:"",suggestRefs:false,reason:""})}
+    setGenerating(false)
+  }
+  function copyToClipboard(){navigator.clipboard.writeText(preview);setCopied(true);setTimeout(function(){setCopied(false)},2000)}
+  function downloadMD(){
+    var name=(fields.skillName||"skill").toLowerCase().replace(/\s+/g,"-");
+    var blob=new Blob([preview],{type:"text/markdown"});var a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=name+".md";a.click()
+  }
+  var mandatoryFields=FIELDS_DEF.filter(function(f){return f.mandatory});
+  var completedCount=mandatoryFields.filter(function(f){return fields[f.key]?.trim()}).length;
+
+  return h("div",{style:{minHeight:"100vh",background:"#FAF8F4",fontFamily:"'Georgia', serif"}},
+    // Sticky toolbar with Back to Home button
+    h("div",{style:{position:"sticky",top:0,zIndex:100,background:"rgba(250,248,244,0.92)",backdropFilter:"blur(12px)",borderBottom:"1px solid rgba(200,185,165,0.25)",padding:"14px 28px",display:"flex",alignItems:"center",gap:16}},
+      h("button",{onClick:p.onBack,title:"Back to Home",style:{background:"none",border:"none",cursor:"pointer",color:"#9A8A7A",fontSize:22,padding:0,lineHeight:1}},"←"),
+      h("div",null,
+        h("div",{style:{fontSize:"0.95rem",fontWeight:600,color:"#2C2318"}},fields.skillName||"New Skill"),
+        h("div",{style:{fontSize:"0.72rem",color:"#A8957F"}},completedCount+"/"+mandatoryFields.length+" mandatory fields complete")
+      )
+    ),
+    // Two-column layout
+    h("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:0,minHeight:"calc(100vh - 65px)",maxWidth:1400,margin:"0 auto"}},
+      // LEFT: Fields
+      h("div",{style:{padding:"40px 32px",overflowY:"auto",borderRight:"1px solid rgba(200,185,165,0.2)"}},
+        h("div",{style:{marginBottom:32}},
+          h("div",{style:{fontSize:11,color:"#A8957F",letterSpacing:"0.08em",textTransform:"uppercase",marginBottom:8}},"✧ Builder"),
+          h("h2",{style:{fontSize:"1.5rem",fontWeight:400,color:"#2C2318",letterSpacing:"-0.02em"}},"Define your skill"),
+          h("p",{style:{fontSize:"0.82rem",color:"#8A7A6A",marginTop:6}},"Fill in the required fields below, then click Generate to produce your Skill.MD.")
+        ),
+        FIELDS_DEF.map(function(f){
+          return h(FieldBlock,{key:f.key,field:f,value:fields[f.key],active:activeField===f.key,
+            onChange:function(v){setFields(function(prev){var n={};for(var k in prev)n[k]=prev[k];n[f.key]=v;return n})},
+            onFocus:function(){setActiveField(f.key)},onBlur:function(){setActiveField(null)}
+          })
+        })
+      ),
+      // RIGHT: Preview
+      h("div",{ref:previewRef,style:{position:"sticky",top:65,height:"calc(100vh - 65px)",overflowY:"auto",padding:"40px 32px",background:"rgba(248,246,240,0.6)"}},
+        h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}},
+          h("div",null,
+            h("div",{style:{fontSize:11,color:"#A8957F",letterSpacing:"0.08em",textTransform:"uppercase",marginBottom:4}},"✧ Live Preview"),
+            h("div",{style:{fontSize:"0.8rem",color:"#9A8A7A"}},"skill.md output")
+          ),
+          h("div",{style:{display:"flex",gap:6}},
+            h(SmallBtn,{onClick:copyToClipboard},copied?"✓":"Copy"),
+            h(SmallBtn,{onClick:downloadMD,primary:true},"↓ .md")
+          )
+        ),
+        // Centered Generate button
+        h("div",{style:{textAlign:"center",marginBottom:16}},
+          h("button",{onClick:generateFull,disabled:generating||completedCount<mandatoryFields.length,
+            style:{padding:"10px 28px",fontSize:"0.85rem",fontFamily:"'Georgia', serif",borderRadius:99,border:"none",background:generating||completedCount<mandatoryFields.length?"#C0B0A0":"#3D2F22",color:"#FAF8F4",cursor:generating||completedCount<mandatoryFields.length?"not-allowed":"pointer",transition:"all 0.2s"}
+          },generating?"Generating...":"✧ Generate Skill.MD")
+        ),
+        // Complexity badge + references banner
+        metaInfo.complexity?h("div",{style:{display:"flex",gap:8,alignItems:"center",marginBottom:12,justifyContent:"center",flexWrap:"wrap"}},
+          h("span",{style:{fontSize:10,background:"#8B7EA822",color:"#8B7EA8",padding:"3px 10px",borderRadius:99,fontWeight:500,textTransform:"capitalize"}},"Complexity: "+metaInfo.complexity),
+          metaInfo.suggestRefs?h("span",{style:{fontSize:10,background:"#7C9A9222",color:"#7C9A92",padding:"3px 10px",borderRadius:99,fontWeight:500}},"💡 Consider /references/ folder"):null,
+          metaInfo.reason?h("span",{title:metaInfo.reason,style:{fontSize:10,background:"rgba(200,185,165,0.3)",color:"#8A7A6A",padding:"3px 10px",borderRadius:99,fontWeight:500,cursor:"help",borderBottom:"1px dashed #B0A090"}},"💡 Why"):null
+        ):null,
+        // Preview box
+        h("div",{style:{background:"rgba(255,253,248,0.8)",backdropFilter:"blur(8px)",border:"1px solid rgba(200,185,165,0.25)",borderRadius:14,padding:"24px",fontFamily:"'Courier New', monospace",fontSize:"0.75rem",lineHeight:1.75,color:"#4A3A2A",whiteSpace:"pre-wrap",wordBreak:"break-word",minHeight:400,position:"relative",overflow:"hidden"}},
+          generating?h("div",{style:{position:"absolute",inset:0,background:"rgba(250,248,244,0.7)",backdropFilter:"blur(4px)",borderRadius:14,display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:12,zIndex:5}},
+            h("div",{className:"shimmer",style:{position:"absolute",inset:0,borderRadius:14}}),
+            h("div",{className:"spinner",style:{zIndex:1}}),h("div",{style:{fontSize:13,color:"#8A7A6A",zIndex:1}},"Generating your Skill.MD...")
+          ):null,
+          preview?h("div",{className:"preview-content"},h(HighlightedMarkdown,{text:preview})):h("div",{style:{textAlign:"center",color:"#C0B0A0",paddingTop:160,fontSize:"0.85rem"}},"Fill in the required fields\nand click Generate to preview")
+        )
+      )
+    )
+  )
+}
+
+
+function App(){
+  var s1=useState("home"),view=s1[0],setView=s1[1];
+  var s2=useState(null),builderState=s2[0],setBuilderState=s2[1];
+  var s3=useState(false),describeSection=s3[0],setDescribeSection=s3[1];
+  var templateRef=useRef(null);
+
+  function openBuilder(prefill){setBuilderState(prefill);setView("builder");setDescribeSection(false)}
+  function scrollToTemplates(){setDescribeSection(false);setTimeout(function(){templateRef.current?.scrollIntoView({behavior:"smooth"})},50)}
+
+  // Config check
+  var configOk=hasConfig();
+
+  if(view==="builder")return h(BuilderWizard,{initial:builderState,onBack:function(){setView("home");setDescribeSection(false)}});
+
+  return h("div",{style:{position:"relative",minHeight:"100vh",background:"#FAF8F4",fontFamily:"'Georgia', serif",overflowX:"hidden"}},
+    h(ParticleField,null),
+    h("style",null,STYLES),
+    // Config warning banner
+    !configOk?h("div",{className:"config-banner alert-enter"},"⚠️ ","API not configured. ",h("a",{href:"#",onClick:function(e){e.preventDefault();openConfigModal()},style:{color:"#5A4A3A",fontWeight:600}},"Open Config")," to set up your Base URL, API Key, and Model Name."):null,
+    // Back to Home button (visible when not on hero)
+    h("div",{style:{position:"fixed",top:configOk?20:52,left:24,zIndex:50}}),
+
+    // ─── HERO ──────────────────────────────────────────────────────────────────
+    h("section",{style:{position:"relative",minHeight:"100vh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:"80px 24px 60px"}},
+      h(FloatingFragment,{text:FRAGMENTS[0],style:{top:"12%",left:"4%",animation:"float1 7s ease-in-out infinite"}}),
+      h(FloatingFragment,{text:FRAGMENTS[1],style:{top:"22%",right:"5%",animation:"float2 9s ease-in-out infinite"}}),
+      h(FloatingFragment,{text:FRAGMENTS[2],style:{bottom:"28%",left:"3%",animation:"float3 8s ease-in-out infinite"}}),
+      h(FloatingFragment,{text:FRAGMENTS[3],style:{bottom:"20%",right:"4%",animation:"float1 10s ease-in-out infinite"}}),
+      h(FloatingFragment,{text:FRAGMENTS[4],style:{top:"50%",left:"1%",animation:"float2 6s ease-in-out infinite"}}),
+      h(FloatingFragment,{text:FRAGMENTS[5],style:{top:"60%",right:"2%",animation:"float3 11s ease-in-out infinite"}}),
+        h("div",{style:{position:"relative",zIndex:1,textAlign:"center",maxWidth:680}},
+        h("div",{style:{display:"flex",flexDirection:"column",alignItems:"center",gap:8,marginBottom:24}},
+          h("div",{style:{display:"inline-flex",alignItems:"center",gap:8,background:"rgba(255,253,248,0.7)",backdropFilter:"blur(8px)",border:"1px solid rgba(200,185,165,0.4)",borderRadius:99,padding:"6px 16px",fontSize:12,color:"#9A8A7A",letterSpacing:"0.08em",textTransform:"uppercase"}},"✧ Claude Skill Builder"),
+          h("a",{href:"#",onClick:function(e){e.preventDefault();openConfigModal()},style:{display:"inline-flex",alignItems:"center",gap:6,background:"rgba(255,253,248,0.5)",backdropFilter:"blur(8px)",border:"1px solid rgba(200,185,165,0.3)",borderRadius:99,padding:"4px 14px",fontSize:11,color:configOk?"#7A9A7A":"#B07060",letterSpacing:"0.06em",textTransform:"uppercase",textDecoration:"none",cursor:"pointer",transition:"all 0.2s"}},configOk?"CONFIG | "+getConfig().MODEL_NAME:"CONFIG")
+        ),
+        h("h1",{style:{fontSize:"clamp(2.4rem,5vw,4rem)",fontWeight:400,lineHeight:1.15,color:"#2C2318",marginBottom:20,letterSpacing:"-0.02em"}},"Craft precision skills",h("br",null),h("em",{style:{fontStyle:"italic",color:"#8A7060"}},"for Claude AI")),
+        h("p",{style:{fontSize:"1.05rem",color:"#7A6A5A",lineHeight:1.75,marginBottom:56,maxWidth:480,margin:"0 auto 56px"}},"Design intelligent, structured Skill.MD files that shape exactly how Claude thinks, responds, and operates — in minutes."),
+        h("div",{style:{display:"flex",justifyContent:"center",gap:18,margin:"0 auto"}},
+          h(HeroCard,{icon:"📋",title:"Use Templates",desc:"Start from 8 expert-crafted skill archetypes",onClick:scrollToTemplates,disabled:!configOk}),
+          h(HeroCard,{icon:"✦",title:"Describe & Generate",desc:"Describe your need, get 5 AI variations",onClick:function(){setDescribeSection(true);setTimeout(function(){document.getElementById("describe-section")?.scrollIntoView({behavior:"smooth"})},50)},disabled:!configOk}),
+          h(HeroCard,{icon:"✏️",title:"Write From Scratch",desc:"Open the builder with a blank canvas",onClick:function(){openBuilder({})},disabled:!configOk})
+        )
+      ),
+      h("div",{style:{position:"absolute",bottom:32,left:"50%",transform:"translateX(-50%)",animation:"float1 3s ease-in-out infinite",opacity:0.4}},
+        h("div",{style:{width:1,height:40,background:"linear-gradient(to bottom, transparent, #9A8A7A)",margin:"0 auto"}})
+      )
+    ),
+
+    // ─── TEMPLATES ─────────────────────────────────────────────────────────────
+    h("section",{ref:templateRef,style:{padding:"72px 22px",maxWidth:1190,margin:"0 auto"}},
+      h(SectionHeader,{label:"Templates",title:"Start from a proven archetype",sub:"Eight expert-crafted skill blueprints, ready to customize"}),
+      h("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(270px,1fr))",gap:22,marginTop:48}},
+        TEMPLATES.map(function(t){return h(TemplateCard,{key:t.id,template:t,onClick:function(){openBuilder(t.prefill)},disabled:!configOk})})
+      )
+    ),
+
+    // ─── DESCRIBE ──────────────────────────────────────────────────────────────
+    describeSection?h("section",{id:"describe-section",style:{padding:"80px 24px",maxWidth:860,margin:"0 auto"}},
+      h(SectionHeader,{label:"Generate",title:"Describe your skill",sub:"Tell us what you need. Claude will generate 5 intelligent variations."}),
+      h(DescribeFlow,{onSelect:function(prefill){openBuilder(prefill)},disabled:!configOk})
+    ):null,
+
+    // ─── FOOTER ────────────────────────────────────────────────────────────────
+    h(Footer,null)
+  )
+}
+
+// ─── FOOTER (with name easter egg) ─────────────────────────────────────────
+function Footer(){
+  var s=useState(false),show=s[0],setShow=s[1];
+  return h("footer",{style:{textAlign:"center",padding:"40px 24px",color:"#B0A090",fontSize:13,borderTop:"1px solid rgba(200,185,165,0.2)",fontFamily:"'Georgia', serif"}},
+    h("div",{style:{display:"flex",alignItems:"center",justifyContent:"center",gap:16,minHeight:34,flexWrap:"wrap"}},
+      show?h("a",{href:"https://www.linkedin.com/in/siddharth-punde-ai-cybersec/",target:"_blank",rel:"noopener noreferrer",className:"madeby-curve",title:"LinkedIn"},"✦ LinkedIn"):null,
+      h("span",{style:{fontSize:13,color:"#B0A090"}},"Skill.MD Builder · Built for AI Enthusiast by ",
+        h("a",{href:"#",onClick:function(e){e.preventDefault();setShow(!show)},className:"madeby-name",title:"Click me"},"Siddharth Punde")),
+      show?h("a",{href:"https://github.com/Siddharth-Punde",target:"_blank",rel:"noopener noreferrer",className:"madeby-curve",title:"GitHub"},"⌗ GitHub"):null
+    )
+  )
+}
+
+var STYLES=`
+  @keyframes float1{0%,100%{transform:translateY(0px)}50%{transform:translateY(-12px)}}
+  @keyframes float2{0%,100%{transform:translateY(0px)}50%{transform:translateY(-18px)}}
+  @keyframes float3{0%,100%{transform:translateY(0px)}50%{transform:translateY(-8px)}}
+  @keyframes shimmer{0%{background-position:-200px 0}100%{background-position:200px 0}}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:#FAF8F4;-webkit-user-select:none;user-select:none;cursor:default}
+  input,textarea,.preview-content,.config-banner{-webkit-user-select:text;user-select:text;cursor:auto}
+  ::-webkit-scrollbar{width:6px}
+  ::-webkit-scrollbar-track{background:transparent}
+  ::-webkit-scrollbar-thumb{background:rgba(180,160,130,0.3);border-radius:3px}
+  .spinner{width:28px;height:28px;border:2px solid rgba(160,130,100,0.2);border-top-color:#9A7A5A;border-radius:50%;animation:spin .8s linear infinite}
+  .shimmer{background:linear-gradient(90deg,rgba(255,253,248,0.3) 25%,rgba(255,253,248,0.7) 50%,rgba(255,253,248,0.3) 75%);background-size:400px 100%;animation:shimmer 1.5s ease-in-out infinite}
+  .config-banner{position:fixed;top:0;left:0;right:0;z-index:999;background:#F5EDE0;border-bottom:1px solid rgba(200,185,165,0.5);padding:10px 24px;display:flex;align-items:center;justify-content:center;gap:10px;font-size:0.82rem;color:#7A6A5A;font-family:'Georgia',serif}
+  .config-banner a{color:#5A4A3A;font-weight:600;margin-left:4px}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  @keyframes slideDown{from{transform:translateY(-100%)}to{transform:translateY(0)}}
+  .madeby-name{color:inherit;font-family:inherit;font-size:inherit;text-decoration:underline;text-underline-offset:3px;text-decoration-color:rgba(160,130,100,0.5);cursor:pointer;transition:color .2s,text-decoration-color .2s;}
+  .madeby-name:hover{color:#5A4A3A;text-decoration-color:#5A4A3A}
+  .madeby-curve{display:inline-flex;align-items:center;justify-content:center;text-decoration:none;color:#5A4A3A;background:rgba(255,253,248,0.75);border:1px solid rgba(200,185,165,0.35);border-radius:99px;padding:7px 16px;font-size:12px;font-family:'Georgia',serif;transition:all .25s;animation:fadeInUp .35s ease;white-space:nowrap}
+  .madeby-curve:hover{background:rgba(255,253,248,0.95);border-color:rgba(160,130,100,0.5);transform:translateY(-2px);box-shadow:0 6px 22px rgba(160,130,100,0.15);color:#3D2F22}
+`;
+
+ReactDOM.createRoot(document.getElementById('root')).render(h(App,null));
+})();
+</script>
+
+<!-- ─── CONFIG MODAL (embedded) ─────────────────────────────────────────── -->
+<div id="configModal" class="config-overlay" style="display:none">
+  <div class="config-modal">
+    <button class="config-close" onclick="closeConfigModal()" title="Close">✕</button>
+    <div class="card">
+      <div class="notice">✧ Configuration</div>
+      <h1>API Settings</h1>
+      <p>Select your provider, paste your key, pick a model.<br>Saved locally in your browser.</p>
+      <div class="field">
+        <label for="provider">API Provider</label>
+        <select id="provider">
+          <option value="">— Select provider —</option>
+          <option value="anthropic">Anthropic</option>
+          <option value="openai">OpenAI</option>
+          <option value="groq">Groq</option>
+          <option value="openrouter">OpenRouter</option>
+          <option value="cursor">Cursor</option>
+          <option value="lmstudio">LM Studio (local)</option>
+          <option value="ollama">Ollama (local)</option>
+          <option value="custom">Custom</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="url">Base URL</label>
+        <input id="url" type="text" placeholder="Select a provider above or type manually">
+        <div class="hint" id="urlHint"></div>
+      </div>
+      <div class="field" id="keyField">
+        <label for="key">API Key</label>
+        <input id="key" type="password" placeholder="Paste your API key here">
+      </div>
+      <div class="field">
+        <label for="model">Model</label>
+        <div class="model-wrap" id="modelWrap">
+          <select id="model">
+            <option value="">— Click to load models —</option>
+          </select>
+          <div class="model-spinner" id="modelSpinner"></div>
+        </div>
+        <div class="hint" id="modelHint">Click the dropdown to fetch available models</div>
+      </div>
+      <button class="btn" id="saveBtn">✧ Save Configuration</button>
+      <div class="status info" id="status">Select a provider to get started</div>
+    </div>
+  </div>
+</div>
+<style>
+.config-overlay{position:fixed;inset:0;z-index:1000;background:rgba(42,32,20,0.45);backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center;padding:24px}
+.config-modal{position:relative;width:460px;max-width:94vw;max-height:92vh;overflow:auto;background:rgba(255,253,248,0.98);border:1px solid rgba(200,185,165,0.35);border-radius:20px;box-shadow:0 24px 80px rgba(60,45,25,0.35)}
+.config-close{position:absolute;top:14px;right:16px;z-index:2;background:none;border:none;font-size:18px;color:#8A7A6A;cursor:pointer;font-family:'Georgia',serif;line-height:1}
+.config-close:hover{color:#3D2F22}
+.config-modal .card{background:none;border:none;box-shadow:none;padding:36px 36px 32px;width:auto;max-width:none;margin:0}
+.config-modal .notice{font-size:11px;color:#A8957F;letter-spacing:0.08em;text-transform:uppercase;margin-bottom:24px;text-align:center}
+.config-modal h1{font-size:1.3rem;font-weight:400;color:#2C2318;margin-bottom:4px;letter-spacing:-0.02em;text-align:center;font-family:'Georgia',serif}
+.config-modal p{font-size:0.82rem;color:#8A7A6A;margin-bottom:28px;text-align:center;line-height:1.5;font-family:'Georgia',serif}
+.config-modal .field{margin-bottom:20px}
+.config-modal .field label{display:block;font-size:0.78rem;font-weight:600;color:#5A4A3A;margin-bottom:6px}
+.config-modal .field input,.config-modal .field select{width:100%;padding:12px 14px;font-family:'Georgia',serif;font-size:0.88rem;color:#2C2318;background:rgba(255,253,248,0.85);border:1px solid rgba(200,185,165,0.35);border-radius:10px;outline:none;transition:border-color 0.2s;appearance:none;-webkit-appearance:none;box-sizing:border-box}
+.config-modal .field select{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%23A8957F' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 14px center;padding-right:36px;cursor:pointer}
+.config-modal .field input:focus,.config-modal .field select:focus{border-color:rgba(160,130,100,0.6)}
+.config-modal .field input::placeholder{color:#B8A898}
+.config-modal .field input[type=password]:not(:placeholder-shown){letter-spacing:0.2em}
+.config-modal .model-wrap{position:relative}
+.config-modal .model-wrap select{width:100%}
+.config-modal .model-spinner{position:absolute;right:36px;top:50%;transform:translateY(-50%);width:16px;height:16px;border:2px solid rgba(160,130,100,0.2);border-top-color:#9A7A5A;border-radius:50%;animation:spin .7s linear infinite;display:none;pointer-events:none}
+.config-modal .model-wrap.loading .model-spinner{display:block}
+.config-modal .model-wrap.loading select{color:#B8A898;pointer-events:none}
+.config-modal .hint{font-size:0.72rem;color:#A8957F;margin-top:5px}
+.config-modal .btn{width:100%;padding:13px 0;background:#3D2F22;color:#FAF8F4;border:none;border-radius:99px;font-size:0.88rem;font-family:'Georgia',serif;cursor:pointer;letter-spacing:0.03em;transition:all 0.2s;margin-top:4px}
+.config-modal .btn:hover{background:#2C2318}
+.config-modal .btn:active{transform:scale(0.98)}
+.config-modal .status{text-align:center;font-size:0.78rem;margin-top:16px;min-height:20px;transition:all 0.3s;font-family:'Georgia',serif}
+.config-modal .status.ok{color:#6B9B7E}
+.config-modal .status.err{color:#B07060}
+.config-modal .status.info{color:#8A7A6A}
+</style>
+<script>
+(function(){
+var PROVIDERS={
+  anthropic:{url:'https://api.anthropic.com/v1',hint:'Requires API key from console.anthropic.com',needsKey:true,modelsEndpoint:'/models',modelsAdapter:function(data){return(data.data||[]).map(m=>m.id).filter(Boolean)},extraHeaders:{'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},authHeader:function(key){return{'x-api-key':key}}},
+  openai:{url:'https://api.openai.com/v1',hint:'Requires API key from platform.openai.com',needsKey:true,modelsEndpoint:'/models',modelsAdapter:function(data){return(data.data||[]).map(m=>m.id).filter(Boolean).sort()},authHeader:function(t){return{Authorization:'Bearer '+t}}},
+  groq:{url:'https://api.groq.com/openai/v1',hint:'Requires API key from console.groq.com',needsKey:true,modelsEndpoint:'/models',modelsAdapter:function(data){return(data.data||[]).map(m=>m.id).filter(Boolean).sort()},authHeader:function(t){return{Authorization:'Bearer '+t}}},
+  openrouter:{url:'https://openrouter.ai/api/v1',hint:'Requires API key from openrouter.ai/keys',needsKey:true,modelsEndpoint:'/models',modelsAdapter:function(data){return(data.data||[]).map(m=>m.id).filter(Boolean).sort()},authHeader:function(t){return{Authorization:'Bearer '+t}}},
+  cursor:{url:'https://api.cursor.sh/v1',hint:'Use your Cursor API key',needsKey:true,modelsEndpoint:'/models',modelsAdapter:function(data){return(data.data||[]).map(m=>m.id).filter(Boolean).sort()},authHeader:function(t){return{Authorization:'Bearer '+t}}},
+  lmstudio:{url:'http://localhost:1234/v1',hint:'LM Studio must be running. Enable CORS in LM Studio → Server settings.',needsKey:false,modelsEndpoint:'/models',modelsAdapter:function(data){return(data.data||[]).map(m=>m.id).filter(Boolean)},authHeader:function(){return{}}},
+  ollama:{url:'http://localhost:11434',hint:'Ollama must be running locally. No API key needed.',needsKey:false,modelsEndpoint:'/api/tags',modelsAdapter:function(data){return(data.models||[]).map(m=>m.name).filter(Boolean)},authHeader:function(){return{}}},
+  custom:{url:'',hint:'Enter any OpenAI-compatible base URL. Model list fetched from /models endpoint.',needsKey:true,modelsEndpoint:'/models',modelsAdapter:function(data){return(data.data||data.models||[]).map(m=>m.id||m.name).filter(Boolean).sort()},authHeader:function(t){return t?{Authorization:'Bearer '+t}:{}}}
+};
+var providerSel=document.getElementById('provider');
+var urlIn=document.getElementById('url');
+var keyIn=document.getElementById('key');
+var keyField=document.getElementById('keyField');
+var modelSel=document.getElementById('model');
+var modelWrap=document.getElementById('modelWrap');
+var modelHint=document.getElementById('modelHint');
+var urlHint=document.getElementById('urlHint');
+var saveBtn=document.getElementById('saveBtn');
+var status=document.getElementById('status');
+function showStatus(msg,type){status.textContent=msg;status.className='status '+(type||'info')}
+providerSel.addEventListener('change',function(){
+  var p=PROVIDERS[this.value];if(!p)return;
+  urlIn.value=p.url;urlHint.textContent=p.hint||'';
+  keyField.style.display=p.needsKey?'block':'none';
+  if(!p.needsKey)keyIn.value='';
+  resetModelDropdown();
+  showStatus('Provider set — paste your key then load models','info');
+});
+function resetModelDropdown(){modelSel.innerHTML='<option value="">— Click to load models —</option>';modelHint.textContent='Click the dropdown to fetch available models'}
+var modelsFetched=false;
+var modelsFetching=false;
+modelSel.addEventListener('mousedown',async function(e){
+  if(modelsFetching)return;
+  var hasRealOptions=modelSel.options.length>1&&modelSel.options[1].value!=='__error__';
+  if(hasRealOptions)return;
+  var base=urlIn.value.trim();
+  if(!base){showStatus('Enter Base URL first','err');e.preventDefault();return}
+  e.preventDefault();await fetchModels();setTimeout(function(){modelSel.focus();},50);
+});
+async function fetchModels(){
+  if(modelsFetching)return;
+  modelsFetching=true;modelWrap.classList.add('loading');
+  modelHint.textContent='Fetching models…';showStatus('Loading models…','info');
+  var providerKey=providerSel.value||'custom';
+  var p=PROVIDERS[providerKey]||PROVIDERS.custom;
+  var baseUrl=urlIn.value.trim().replace(/\/+$/,'');
+  var apiKey=keyIn.value.trim();
+  var endpoint=baseUrl+p.modelsEndpoint;
+  var headers={'Content-Type':'application/json',...(p.extraHeaders||{}),...p.authHeader(apiKey)};
+  try{
+    var res=await fetch(endpoint,{method:'GET',headers,signal:AbortSignal.timeout(15000)});
+    if(!res.ok){var errBody=await res.json().catch(()=>({error:{message:'HTTP '+res.status}}));throw new Error((errBody.error&&errBody.error.message)||'HTTP '+res.status)}
+    var data=await res.json();
+    var models=p.modelsAdapter(data);
+    if(!models||models.length===0)throw new Error('No models returned');
+    var savedModel=getSavedModel();
+    modelSel.innerHTML='';
+    models.forEach(function(id){var opt=document.createElement('option');opt.value=id;opt.textContent=id;if(id===savedModel)opt.selected=true;modelSel.appendChild(opt)});
+    modelHint.textContent=models.length+' models loaded';
+    showStatus('✓ '+models.length+' models loaded','ok');
+    modelsFetched=true;
+  }catch(err){
+    modelSel.innerHTML='<option value="__error__">Failed to load — type model name manually</option>';
+    addManualModelInput();
+    modelHint.textContent='Could not fetch: '+err.message;
+    showStatus('Model fetch failed: '+err.message,'err');
+  }finally{modelWrap.classList.remove('loading');modelsFetching=false}
+}
+function addManualModelInput(){
+  var wrap=document.getElementById('modelWrap');
+  var existing=document.getElementById('modelManual');
+  if(existing)return;
+  var inp=document.createElement('input');
+  inp.type='text';inp.id='modelManual';inp.placeholder='Type model name manually (e.g. gpt-4o)';
+  inp.style.cssText='width:100%;padding:12px 14px;font-family:Georgia,serif;font-size:0.88rem;color:#2C2318;background:rgba(255,253,248,0.85);border:1px solid rgba(200,185,165,0.35);border-radius:10px;outline:none;margin-top:8px;box-sizing:border-box';
+  wrap.appendChild(inp);
+  var saved=getSavedModel();if(saved)inp.value=saved;
+}
+function getModelValue(){
+  var manual=document.getElementById('modelManual');
+  if(manual&&manual.value.trim())return manual.value.trim();
+  return modelSel.value&&modelSel.value!=='__error__'?modelSel.value:'';
+}
+function getSavedModel(){
+  try{return JSON.parse(localStorage.getItem('claude-skill-config')||'{}').MODEL_NAME||''}catch(e){return''}
+}
+saveBtn.addEventListener('click',function(){
+  var url=urlIn.value.trim();var key=keyIn.value.trim();var model=getModelValue();
+  if(!url){showStatus('Base URL is required','err');return}
+  if(!model){showStatus('Select or type a model name','err');return}
+  var providerKey=providerSel.value||'custom';
+  var p=PROVIDERS[providerKey];
+  if(p&&p.needsKey&&!key){showStatus('API Key is required for this provider','err');return}
+  try{
+    localStorage.setItem('claude-skill-config',JSON.stringify({BASE_URL:url,API_KEY:key,MODEL_NAME:model}));
+    showStatus('✓ Saved! Config is ready.','ok');
+  }catch(e){showStatus('Failed to save: '+e.message,'err')}
+});
+function loadConfig(){
+  try{
+    var cfg=JSON.parse(localStorage.getItem('claude-skill-config')||'{}');
+    if(cfg.BASE_URL){
+      urlIn.value=cfg.BASE_URL;
+      var matched='custom';
+      Object.entries(PROVIDERS).forEach(function(e){if(e[1].url&&cfg.BASE_URL.startsWith(e[1].url))matched=e[0]});
+      providerSel.value=matched;
+      var p=PROVIDERS[matched];
+      if(p){urlHint.textContent=p.hint||'';keyField.style.display=p.needsKey?'block':'none'}
+    }
+    if(cfg.API_KEY)keyIn.value=cfg.API_KEY;
+    if(cfg.MODEL_NAME){
+      modelSel.innerHTML='';
+      var opt=document.createElement('option');opt.value=cfg.MODEL_NAME;opt.textContent=cfg.MODEL_NAME;opt.selected=true;modelSel.appendChild(opt);
+      var refetch=document.createElement('option');refetch.value='__reload__';refetch.textContent='↻ Click to reload full model list';modelSel.appendChild(refetch);
+      modelHint.textContent='Showing saved model. Click dropdown to reload full list.';
+    }
+    if(cfg.BASE_URL||cfg.API_KEY||cfg.MODEL_NAME)showStatus('Configuration loaded','ok');
+  }catch(e){}
+}
+modelSel.addEventListener('change',function(){
+  if(this.value==='__reload__'){modelsFetched=false;resetModelDropdown();fetchModels()}
+});
+loadConfig();
+})();
+function openConfigModal(){document.getElementById('configModal').style.display='flex'}
+function closeConfigModal(){document.getElementById('configModal').style.display='none'}
+</script>
+</body>
+</html>
+
