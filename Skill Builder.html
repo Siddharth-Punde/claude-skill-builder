@@ -26,7 +26,7 @@ body{background:#FAF8F4}
 <div id="root"></div>
 <script src="lib/react.production.min.js"></script>
 <script src="lib/react-dom.production.min.js"></script>
-<script type="text/template" id="skill-prompt-template">You are an expert Claude skill architect. Convert structured form input into a production-quality SKILL.md file.
+<script type="text/template" id="skill-prompt-template">You are an expert Claude Skill architect. A Skill is a SKILL.md file that gets loaded into Claude's context whenever it triggers, to teach Claude how to do one specific task well. Convert the structured form input below into a production-quality SKILL.md.
 
 ---
 
@@ -54,16 +54,30 @@ Exception: Workflow. If Workflow Steps is NULL, DERIVE steps from Core Function 
 
 ---
 
+## CORE PRINCIPLES (apply to every section below)
+
+These come from how Claude Skills actually get used, not generic writing advice — follow them even where they push against a section's word-count guidance:
+
+1. **Lean over padded.** This file gets re-read by Claude every single time the skill triggers. A sentence that could describe literally any skill ("be accurate", "be helpful", "communicate clearly") is pure noise — cut it. If a whole section would only contain that kind of filler, omit the section rather than writing a placeholder-quality version of it.
+2. **Explain the why, don't just decree.** Claude follows a rule it understands the reason for much more reliably than one it's just told to obey. Prefer "Cite sources — an uncited claim reads as fact and can't be checked" over a bare "Always cite sources." Reserve hard ALL-CAPS MUST/NEVER language for the few things where the consequence of getting it wrong is genuinely severe (irreversible actions, safety, legal exposure) — using it everywhere trains it to be ignored.
+3. **General, not overfit.** Write instructions that generalize across the many different ways this skill will actually be invoked. Don't hard-code the one example the user gave into a rule that only fits that example.
+4. **No surprises.** What the skill actually does should match what its name and description promise — don't smuggle in unrelated behavior.
+5. **Match depth to complexity.** A simple skill should produce a short file. Only go long where the task genuinely has that much nuance. Do not pad a simple skill out to look like a complex one.
+
+---
+
 ## OUTPUT FORMAT
 
 Produce raw SKILL.md only.
 - Start with `---` (YAML frontmatter open)
-- End with last line of content
+- End with the last line of the skill's own content
 - No preamble, no explanation, no markdown fences wrapping the whole output
-- No HTML comments in the final file
+- Do not put any HTML comments inside the SKILL.md content itself
 
-After the SKILL.md content, on a NEW LINE output this metadata block ONLY (for the builder UI, not part of the skill file):
+Then, after the SKILL.md content ends, on a new line that is OUTSIDE the file's own content, output exactly one metadata line for the builder UI (this line is never part of the skill file itself, so it doesn't violate the "no HTML comments in the content" rule above — it comes after the content, not within it):
 <!--BUILDER_META complexity: simple|moderate|complex suggest_references: true|false reason: string -->
+
+Set suggest_references: true only when the skill's domain genuinely has enough variant-specific detail (e.g. multiple frameworks, file formats, or regulatory regimes) that a real author would want to split detail into a references/ folder rather than inline it — most skills should get false.
 
 ---
 
@@ -73,10 +87,12 @@ After the SKILL.md content, on a NEW LINE output this metadata block ONLY (for t
 
 name: {{skill_name | kebab-case | lowercase}}
 description: >
-  [TRIGGER-FIRST paragraph. Max 80 words. Rules:
+  [TRIGGER-FIRST paragraph. Max 80 words. This is the single most important field — it's the only
+   part of the skill Claude sees before deciding whether to consult it, so it has to do real work. Rules:
    1. Lead with what the skill DOES (verb-first: "Generates...", "Analyzes...", "Converts...")
    2. Follow with WHEN TO TRIGGER: list specific user phrases, task types, keywords, contexts
-   3. Be slightly pushy — Claude undertriggers by default, so list edge cases that should still fire this skill
+   3. Be slightly pushy — Claude undertriggers by default, so explicitly list edge cases and phrasings
+      that should still fire this skill even when the user doesn't use the obvious keyword
    4. All "when to use" info lives HERE only, never in the body
 
    WEAK (don't do): "A skill for helping with data analysis tasks."
@@ -90,30 +106,44 @@ compatibility: [only include if skill needs specific tools/MCPs/deps — otherwi
 - H1 = Skill Name in Title Case
 - 1-2 sentences: plain-English what + who benefits. No fluff.
 
-### Goals (always required)
+### Goals (always required, but keep it tight)
 - Derive directly from Goals & Objectives field
 - Bullet list, action-oriented ("Enable X", "Produce Y", "Ensure Z")
-- 2-4 bullets max
+- 2-4 bullets max — if a goal would just restate the Core Function in different words, cut it rather than padding to hit a count
 
 ### Tone & Voice (only if field NOT NULL)
-- 2-4 bullets reflecting the style
-- If field IS NULL → omit section entirely, no placeholder
+- 2-4 sentences reflecting the style, only as long as needed to actually change how Claude writes
+- If field IS NULL → omit section entirely, no placeholder. Most skills — especially technical, code, or data ones — don't need an invented personality; don't manufacture one just to fill the section
 
 ### Workflow (always required — derive if NULL)
 RULES:
 - If Workflow Steps provided → clean, number, convert to imperative verbs
-- If Workflow Steps NULL → infer sensible 4-6 steps from Core Function + Goals alone
-- Format: `N. **Step title** — what to do and why (one line)`
-- 4-8 steps ideal, hard max 10
+- If Workflow Steps NULL → infer sensible steps from Core Function + Goals alone
+- Format: `N. **Step title** — what to do and why (one line)`. The "why" matters: a step Claude understands the purpose of, it can adapt correctly when the real situation doesn't exactly match the script
+- Only as many steps as the task genuinely has — 4-8 is typical, hard max 10; don't split one step into two just to hit a minimum
 - If any provided step conflicts with a Constraint → Constraint wins; rewrite the step to comply, do not silently drop it
 
-### Constraints & Safety (only if field NOT NULL, OR domain clearly implies critical rules)
+### Constraints & Safety (only if field NOT NULL, OR the domain clearly carries real risk — e.g. medical, legal, financial, security/auth, PII, content involving minors, or destructive/irreversible actions)
+- Include only the constraints this specific skill's actual failure modes call for. There is no target count — one well-reasoned paragraph beats six generic bullets, and if nothing beyond ordinary careful practice applies, omit the section rather than inventing rules
+- Prefer stating the reasoning over a bare imperative: "Flag when a conclusion outruns what the sample size supports" is more useful than "Always be accurate"
+- Use direct MUST/NEVER language only for the genuinely severe cases (per Core Principle 2); everything else reads better as guidance with its rationale attached
+- If the user's own Constraints field already contains explicit rules, preserve their substance and specificity — tighten wording if needed, but never soften a rule they wrote or pad the section with unrelated rules they didn't ask for
 
 ### Examples (only if field NOT NULL)
 - Max 2 examples
+- Each should show something a generic, skill-less response wouldn't do — that's what makes an example worth including
 
 ### Output Types (only if field NOT NULL)
-- Bullet list of artifact/output types</script>
+- Bullet list of artifact/output types
+
+---
+
+## FINAL CHECK before outputting
+
+- Does every remaining section survive Core Principle 1 — would a sentence in it be false if applied to some other, different skill? If not, it's too generic; cut or rewrite it.
+- Is any section present whose input field was NULL (Workflow is the one allowed exception, since it's derived)? If so, remove it.
+- Does Constraints & Safety read as reasoning a careful person would actually follow, rather than a list of ALL-CAPS rules for their own sake?
+- Is the total length proportional to how genuinely complex this skill is — not padded to look thorough?</script>
 <script>
 (function(){
 'use strict';
@@ -206,7 +236,15 @@ Priority order for every field:
   1st: Extract directly from user input (exact signal)
   2nd: Infer from strong implication in user input
   3rd: Derive intelligently from Skill Name + Core Function + Goals + domain
-Never leave a field empty. Always produce usable content.
+For the structural fields (skillName, coreFunction, goals, workflow, examples): never leave
+them empty, always produce usable content — these are always genuinely useful.
+For tone and constraints specifically: it is fine, and often correct, to return the literal
+string "NULL" instead of inventing content. Not every skill needs a manufactured personality
+or a padded rules list — a technical or code-generation skill usually has no distinct "voice",
+and a low-risk skill may have no failure modes beyond ordinary careful practice. A forced
+generic tone or a padded constraint list is worse than an honest NULL, because the downstream
+SKILL.md builder omits NULL sections entirely rather than including filler. Only derive real
+content for these two fields when the domain plausibly calls for it.
 
 RULE 2 — MARK INFERRED CONTENT
 - Directly extracted -> no marker
@@ -289,19 +327,22 @@ Good: "Surface scalability and security risks in proposed architectures
   before implementation begins, so critical decisions aren't made blind"
 
 ── FIELD 4: TONE & VOICE ──
-Target: 4-5 sentences covering ALL of:
+If a distinct voice would genuinely change how Claude communicates for this skill, cover:
 a) Core style adjectives (2-3 defining words)
 b) Role archetype ("senior analyst", "patient teacher", "trusted advisor")
 c) What this voice actively DOES ("asks sharp clarifying questions before planning")
 d) What this voice deliberately AVOIDS ("never condescending", "avoids jargon
    unless user signals technical fluency")
 e) How it adapts to different user types
+Keep it to as many sentences as actually earns its place — usually 2-4, occasionally 5.
 
-If user gave tone signal -> extract and expand to hit all 5 elements
-If no tone signal -> derive from skill domain and function, mark full block [~]
-Example derivation: a code debugging skill -> "Precise and technically direct,
-like a senior engineer doing a code review..."
-NEVER leave this as a generic "be helpful and friendly" block.
+If user gave tone signal -> extract and expand only the elements that signal supports.
+If no tone signal AND the domain plausibly implies a distinct voice (e.g. a brand-voice
+writing skill, a coaching skill) -> derive from skill domain and function, mark [~].
+If no tone signal AND the domain has no natural distinct voice (schema design, data
+pipelines, code generation, file conversion) -> return exactly "NULL". Do not manufacture
+a generic "be helpful and friendly" or "be professional and clear" block just to fill the
+field — that's worse than admitting the skill doesn't need one.
 
 ── FIELD 5: WORKFLOW STEPS ──
 Target: 6-8 steps (hard max 10)
@@ -320,23 +361,34 @@ If no steps -> DERIVE full workflow from Core Function + Goals, mark all [~]
 NEVER leave this field empty or thin - this is the most important field.
 
 ── FIELD 6: CONSTRAINTS & SAFETY ──
-Target: 3 Always + 3 Never rules minimum
-Each rule MUST:
-- Be specific to THIS skill's actual failure modes
+No fixed quota — include only what this specific skill's real failure modes call for.
+A skill can legitimately need zero, one, or several; forcing a minimum count produces
+generic filler that trains Claude to skim past the whole section. Each rule you DO include
+must:
+- Be specific to THIS skill's actual failure modes (not generic Claude behavior)
 - Name the harm or quality problem it prevents
-- Be actionable: reader knows exactly what to do/avoid
+- Prefer stating the reasoning over a bare imperative — Claude follows a rule it
+  understands the point of more reliably than one it's just told to obey
+- Reserve hard "Always/Never" imperative phrasing for the few things where getting it
+  wrong is genuinely severe (irreversible actions, safety, legal, PII); softer guidance
+  reads better for everything else
 
-If user gave constraints -> extract and expand to hit density target
-If no constraints -> derive from skill domain's known failure modes, mark [~]
-If risky domain -> add domain constraints, mark [~auto]
+If user gave constraints -> extract and preserve their substance; tighten wording but
+  don't soften or drop a rule they actually wrote, and don't pad with unrelated ones
+If no constraints AND the domain carries real risk (medical, legal, financial, security,
+  PII, content involving minors, destructive/irreversible operations) -> derive from that
+  domain's known failure modes, mark [~auto]
+If no constraints AND the domain is low-risk with no special failure modes beyond ordinary
+  careful practice (e.g. a brainstorming or formatting skill) -> return exactly "NULL"
+  rather than inventing generic rules
 
 Bad: "Always be helpful and accurate"
-Good: "Always flag when a data conclusion exceeds what the sample
-  size can support - state confidence level explicitly"
+Good: "Flag when a data conclusion exceeds what the sample
+  size can support — state confidence level explicitly"
 
 Bad: "Never say harmful things"
-Good: "Never present correlation as causation without marking
-  the distinction clearly in the output"
+Good: "Present correlation as causation only when the data supports causation —
+  mark the distinction clearly whenever it doesn't"
 
 ── FIELD 7: EXAMPLE INTERACTIONS ──
 Target: 2 complete pairs
@@ -361,10 +413,13 @@ Each object in the array has these fields:
   - "approach": one of "analytical", "creative", "structured", "adaptive", "precise"
   - "skillName": 2-5 word Title Case skill name
   - "coreFunction": single sentence verb-first starting with "Enables Claude to"
-  - "goals": 3-4 action-verb goals separated by " | "
-  - "tone": 4-5 sentences covering all 5 tone elements
-  - "workflow": 6-8 imperative steps with what + why separated by " | "
-  - "constraints": Always/Never rules separated by " | ", minimum 3+3
+  - "goals": 2-4 action-verb goals separated by " | "
+  - "tone": 2-5 sentences covering the relevant tone elements, OR exactly "NULL" if this
+    skill's domain has no natural distinct voice
+  - "workflow": 4-8 imperative steps with what + why separated by " | "
+  - "constraints": reasoning-first rules separated by " | ", however many this skill's real
+    failure modes genuinely call for, OR exactly "NULL" if none apply beyond ordinary
+    careful practice
   - "examples": 1-2 User/Claude pairs separated by " ||| "
 
 Each of the 5 objects must be a distinctly different interpretation — different angle, emphasis, or framing of the user's description.
@@ -373,14 +428,18 @@ Each of the 5 objects must be a distinctly different interpretation — differen
 SELF-CHECK (verify for all 5 JSON objects before outputting)
 ═══════════════════════════════════════════
 
-□ Zero empty fields — every field in every object has real, dense content
+□ Structural fields (name, coreFunction, goals, workflow, examples) are never empty
+□ Tone and constraints are either genuinely earned content or honestly "NULL" — not
+  generic filler manufactured to avoid an empty field
 □ All 5 approaches are distinct interpretations
 □ All inferred content marked [~] so builder can highlight it
 □ Field 2: names specific action AND specific output type
 □ Field 3: all goals pass "not generic" test — domain-specific outcomes only
-□ Field 4: covers all 5 tone elements (style, archetype, active behaviors, avoids, adaptation)
-□ Field 5: every step has verb + what + why, ordered by dependency, min 6 steps
-□ Field 6: constraints name actual failure modes of THIS skill, not generic Claude rules
+□ Field 4 (if not NULL): the tone content would actually change how Claude writes for
+  this skill specifically, not swappable with any other skill's tone block
+□ Field 5: every step has verb + what + why, ordered by dependency
+□ Field 6 (if not NULL): constraints name actual failure modes of THIS skill and explain
+  why, not a padded quota of generic Claude rules
 □ Field 7: both examples show skill-specific structure a generic response wouldn't show
 □ Output is ONLY the JSON array — no preamble, no explanation
 
@@ -973,4 +1032,3 @@ function closeConfigModal(){document.getElementById('configModal').style.display
 </script>
 </body>
 </html>
-
